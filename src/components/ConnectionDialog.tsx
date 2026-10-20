@@ -2,6 +2,7 @@ import { CheckCircle2, AlertCircle, Link2 } from "lucide-react";
 import { useState } from "react";
 import { api, type ConnectionConfig, type SslMode } from "../lib/api";
 import { useApp } from "../store";
+import { KindSwitch } from "./SshDialogs";
 import { Field, Modal, Spinner } from "./ui";
 
 const COLORS = ["#5b8cff", "#4cc38a", "#e7b350", "#f26d6d", "#b07cff", "#3fc1c9", "#ff8a4c", "#8a92a0"];
@@ -125,6 +126,7 @@ export function ConnectionDialog() {
           void save();
         }}
       >
+        {isNew && <KindSwitch value="postgres" />}
         <div className="flex h-8 items-center gap-2 rounded-md border border-dashed border-border bg-bg px-2.5 focus-within:border-accent">
           <Link2 size={13} className="text-faint" />
           <input
@@ -241,6 +243,7 @@ export function PasswordPrompt() {
     <Modal
       title={`Password for ${conn?.name ?? "connection"}`}
       width={400}
+      closeOnBackdrop={false}
       onClose={() => resolve(null)}
       footer={
         <>

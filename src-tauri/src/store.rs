@@ -4,6 +4,7 @@
 //! fall back to a separate JSON file.
 
 use crate::error::{AppError, AppResult};
+use crate::ssh::SshConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -30,6 +31,8 @@ pub struct ConnectionConfig {
 #[derive(Default, Serialize, Deserialize)]
 struct StoreFile {
     connections: Vec<ConnectionConfig>,
+    #[serde(default)]
+    ssh_hosts: Vec<SshConfig>,
 }
 
 pub struct Store {
@@ -89,6 +92,46 @@ impl Store {
         self.save()
     }
 
+    pub fn list_ssh(&self) -> Vec<SshConfig> {
+        self.file.ssh_hosts.clone()
+    }
+
+    pub fn get_ssh(&self, id: &str) -> AppResult<SshConfig> {
+        self.file
+            .ssh_hosts
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+            .ok_or_else(|| AppError::msg(format!("Unknown SSH host {id}")))
+    }
+
+    pub fn upsert_ssh(&mut self, config: SshConfig) -> AppResult<()> {
+        match self.file.ssh_hosts.iter_mut().find(|c| c.id == config.id) {
+            Some(existing) => *existing = config,
+            None => self.file.ssh_hosts.push(config),
+        }
+        self.save()
+    }
+
+    pub fn delete_ssh(&mut self, id: &str) -> AppResult<()> {
+        self.file.ssh_hosts.retain(|c| c.id != id);
+        self.save()?;
+        secret::delete(&self.dir, &ssh_secret_key(id));
+        Ok(())
+    }
+
+    pub fn known_hosts_path(&self) -> std::path::PathBuf {
+        self.dir.join("known_hosts")
+    }
+
+    pub fn get_ssh_secret(&self, id: &str) -> Option<String> {
+        secret::get(&self.dir, &ssh_secret_key(id))
+    }
+
+    pub fn set_ssh_secret(&self, id: &str, secret: Option<&str>) -> AppResult<()> {
+        self.set_password(&ssh_secret_key(id), secret)
+    }
+
     pub fn get_password(&self, id: &str) -> Option<String> {
         secret::get(&self.dir, id)
     }
@@ -102,6 +145,12 @@ impl Store {
             }
         }
     }
+}
+
+/// SSH secrets (password or key passphrase) share the credential store with
+/// database passwords, under a prefixed name.
+fn ssh_secret_key(id: &str) -> String {
+    format!("ssh:{id}")
 }
 
 #[cfg(windows)]

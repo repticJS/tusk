@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { api, type ConnectionConfig, type SessionRef } from "./lib/api";
+import { api, sshApi, type ConnectionConfig, type SessionRef, type SshHost } from "./lib/api";
 import * as meta from "./lib/meta";
 
 export interface QueryTab {
@@ -24,7 +24,18 @@ export interface TableTab {
   objKind: meta.RelKind;
 }
 
-export type Tab = QueryTab | TableTab;
+export interface TerminalTab {
+  id: string;
+  kind: "terminal";
+  title: string;
+  hostId: string;
+}
+
+/** Tabs bound to a database connection. */
+export type DbTab = QueryTab | TableTab;
+export type Tab = DbTab | TerminalTab;
+
+export const isDbTab = (t: Tab | undefined): t is DbTab => !!t && t.kind !== "terminal";
 
 export interface HistoryEntry {
   sql: string;
@@ -50,10 +61,26 @@ interface PasswordRequest {
   resolve: (pw: string | null) => void;
 }
 
+export interface SshSecretRequest {
+  hostId: string;
+  what: "password" | "passphrase";
+  message?: string;
+  resolve: (r: { secret: string; save: boolean } | null) => void;
+}
+
+export interface HostKeyRequest {
+  hostId: string;
+  message: string;
+  key: string;
+  changed: boolean;
+  resolve: (accept: boolean) => void;
+}
+
 interface State {
   theme: "dark" | "light";
   rowLimit: number;
   connections: ConnectionConfig[];
+  sshHosts: SshHost[];
   status: Record<string, ConnStatus | undefined>;
   databases: Record<string, string[] | undefined>;
   cache: Record<string, DbCache | undefined>;
@@ -62,7 +89,10 @@ interface State {
   history: HistoryEntry[];
 
   connectionDialog: { open: boolean; editing?: ConnectionConfig };
+  sshDialog: { open: boolean; editing?: SshHost };
   passwordRequest: PasswordRequest | null;
+  sshSecretRequest: SshSecretRequest | null;
+  hostKeyRequest: HostKeyRequest | null;
   paletteOpen: boolean;
   historyOpen: boolean;
   toast: { id: number; text: string; tone: "ok" | "error" | "info" } | null;
@@ -72,6 +102,14 @@ interface State {
   loadConnections(): Promise<void>;
   openConnectionDialog(editing?: ConnectionConfig): void;
   closeConnectionDialog(): void;
+  openSshDialog(editing?: SshHost): void;
+  closeSshDialog(): void;
+  deleteSshHost(id: string): Promise<void>;
+  openTerminalTab(hostId: string): void;
+  requestSshSecret(r: Omit<SshSecretRequest, "resolve">): Promise<{ secret: string; save: boolean } | null>;
+  resolveSshSecret(r: { secret: string; save: boolean } | null): void;
+  requestHostKey(r: Omit<HostKeyRequest, "resolve">): Promise<boolean>;
+  resolveHostKey(accept: boolean): void;
   connect(connId: string): Promise<boolean>;
   disconnect(connId: string): Promise<void>;
   deleteConnection(connId: string): Promise<void>;
@@ -100,7 +138,7 @@ export const metaSession = (connId: string, database: string): SessionRef => ({
   purpose: "meta",
 });
 
-export const tabSession = (tab: Tab): SessionRef => ({
+export const tabSession = (tab: DbTab): SessionRef => ({
   connId: tab.connId,
   database: tab.database,
   purpose: tab.kind === "query" ? `tab:${tab.id}` : "meta",
@@ -118,6 +156,7 @@ export const useApp = create<State>()(
       theme: "dark",
       rowLimit: 10000,
       connections: [],
+      sshHosts: [],
       status: {},
       databases: {},
       cache: {},
@@ -125,7 +164,10 @@ export const useApp = create<State>()(
       activeTabId: null,
       history: [],
       connectionDialog: { open: false },
+      sshDialog: { open: false },
       passwordRequest: null,
+      sshSecretRequest: null,
+      hostKeyRequest: null,
       paletteOpen: false,
       historyOpen: false,
       toast: null,
@@ -138,18 +180,62 @@ export const useApp = create<State>()(
       setRowLimit: (rowLimit) => set({ rowLimit }),
 
       async loadConnections() {
-        const connections = await api.listConnections();
-        // Drop tabs whose connection no longer exists.
-        const ids = new Set(connections.map((c) => c.id));
-        const tabs = get().tabs.filter((t) => ids.has(t.connId));
+        const [connections, sshHosts] = await Promise.all([api.listConnections(), sshApi.list()]);
+        // Drop tabs whose connection or host no longer exists.
+        const ids = new Set([...connections.map((c) => c.id), ...sshHosts.map((h) => h.id)]);
+        const tabs = get().tabs.filter((t) => ids.has(t.kind === "terminal" ? t.hostId : t.connId));
         const activeTabId = tabs.some((t) => t.id === get().activeTabId)
           ? get().activeTabId
           : (tabs[0]?.id ?? null);
-        set({ connections, tabs, activeTabId });
+        set({ connections, sshHosts, tabs, activeTabId });
       },
 
       openConnectionDialog: (editing) => set({ connectionDialog: { open: true, editing } }),
       closeConnectionDialog: () => set({ connectionDialog: { open: false } }),
+      openSshDialog: (editing) => set({ sshDialog: { open: true, editing } }),
+      closeSshDialog: () => set({ sshDialog: { open: false } }),
+
+      async deleteSshHost(id) {
+        await sshApi.remove(id);
+        set((s) => {
+          const tabs = s.tabs.filter((t) => !(t.kind === "terminal" && t.hostId === id));
+          return {
+            tabs,
+            activeTabId: tabs.some((t) => t.id === s.activeTabId) ? s.activeTabId : (tabs[0]?.id ?? null),
+          };
+        });
+        await get().loadConnections();
+      },
+
+      openTerminalTab(hostId) {
+        const host = get().sshHosts.find((h) => h.id === hostId);
+        if (!host) return;
+        const same = get().tabs.filter((t) => t.kind === "terminal" && t.hostId === hostId).length;
+        const id = uid();
+        const tab: TerminalTab = { id, kind: "terminal", hostId, title: same ? `${host.name} (${same + 1})` : host.name };
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: id }));
+      },
+
+      requestSshSecret(r) {
+        return new Promise((resolve) => {
+          get().sshSecretRequest?.resolve(null);
+          set({ sshSecretRequest: { ...r, resolve } });
+        });
+      },
+      resolveSshSecret(r) {
+        get().sshSecretRequest?.resolve(r);
+        set({ sshSecretRequest: null });
+      },
+      requestHostKey(r) {
+        return new Promise((resolve) => {
+          get().hostKeyRequest?.resolve(false);
+          set({ hostKeyRequest: { ...r, resolve } });
+        });
+      },
+      resolveHostKey(accept) {
+        get().hostKeyRequest?.resolve(accept);
+        set({ hostKeyRequest: null });
+      },
 
       async connect(connId) {
         const conn = get().connections.find((c) => c.id === connId);
@@ -189,7 +275,7 @@ export const useApp = create<State>()(
       async deleteConnection(connId) {
         await api.deleteConnection(connId);
         set((s) => {
-          const tabs = s.tabs.filter((t) => t.connId !== connId);
+          const tabs = s.tabs.filter((t) => !(isDbTab(t) && t.connId === connId));
           return {
             tabs,
             activeTabId: tabs.some((t) => t.id === s.activeTabId) ? s.activeTabId : (tabs[0]?.id ?? null),
@@ -266,12 +352,14 @@ export const useApp = create<State>()(
       },
 
       updateTab(id, patch) {
+        // Only query tabs are edited in place.
         set((s) => ({ tabs: s.tabs.map((t) => (t.id === id ? ({ ...t, ...patch } as Tab) : t)) }));
       },
 
       closeTab(id) {
         const tab = get().tabs.find((t) => t.id === id);
         if (tab?.kind === "query") void api.closeSession(tabSession(tab)).catch(() => {});
+        if (tab?.kind === "terminal") void sshApi.close(tab.id).catch(() => {});
         set((s) => {
           const idx = s.tabs.findIndex((t) => t.id === id);
           const tabs = s.tabs.filter((t) => t.id !== id);
@@ -319,8 +407,9 @@ export const useApp = create<State>()(
       partialize: (s) => ({
         theme: s.theme,
         rowLimit: s.rowLimit,
-        tabs: s.tabs,
-        activeTabId: s.activeTabId,
+        // Terminal sessions don't survive a restart, so their tabs aren't restored.
+        tabs: s.tabs.filter((t) => t.kind !== "terminal"),
+        activeTabId: s.tabs.find((t) => t.id === s.activeTabId)?.kind === "terminal" ? null : s.activeTabId,
         history: s.history,
       }),
     },
@@ -329,7 +418,7 @@ export const useApp = create<State>()(
 
 export const activeConnectionOf = (s: State): { connId: string; database: string } | null => {
   const tab = s.tabs.find((t) => t.id === s.activeTabId);
-  if (tab) return { connId: tab.connId, database: tab.database };
+  if (isDbTab(tab)) return { connId: tab.connId, database: tab.database };
   const connected = s.connections.find((c) => s.status[c.id]?.state === "connected");
   return connected ? { connId: connected.id, database: connected.database } : null;
 };

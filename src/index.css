@@ -166,3 +166,11 @@ select,
 @utility kbd {
   @apply rounded border border-border bg-panel-2 px-1.5 py-px font-mono text-[11px] text-muted;
 }
+
+/* Terminal */
+.tusk-terminal .xterm {
+  height: 100%;
+}
+.tusk-terminal .xterm-viewport {
+  background-color: transparent !important;
+}

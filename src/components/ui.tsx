@@ -8,6 +8,8 @@ export function Modal(props: {
   children: ReactNode;
   footer?: ReactNode;
   width?: number;
+  /** Set false for prompts a stray click shouldn't cancel (passwords, host keys). */
+  closeOnBackdrop?: boolean;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -22,7 +24,7 @@ export function Modal(props: {
   return createPortal(
     <div
       className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/45 p-6 backdrop-blur-[2px]"
-      onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}
+      onMouseDown={(e) => props.closeOnBackdrop !== false && e.target === e.currentTarget && props.onClose()}
     >
       <div
         className="flex max-h-full flex-col overflow-hidden rounded-xl border border-border bg-panel shadow-2xl"

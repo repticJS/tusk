@@ -1,4 +1,4 @@
-import { Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2 } from "lucide-react";
+import { Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { formatDuration } from "../lib/sql";
@@ -51,6 +51,15 @@ export function CommandPalette() {
       run: () => state.setTheme(state.theme === "dark" ? "light" : "dark"),
     });
     out.push({ id: "history", icon: <Clock size={14} />, label: "Query history", run: () => state.setHistoryOpen(true) });
+    for (const h of state.sshHosts) {
+      out.push({
+        id: `ssh-${h.id}`,
+        icon: <TerminalSquare size={14} />,
+        label: `SSH: ${h.name}`,
+        detail: `${h.user}@${h.host}`,
+        run: () => state.openTerminalTab(h.id),
+      });
+    }
     for (const c of state.connections) {
       if (state.status[c.id]?.state !== "connected") {
         out.push({ id: `connect-${c.id}`, icon: <Database size={14} />, label: `Connect: ${c.name}`, run: () => void state.connect(c.id) });
@@ -70,7 +79,7 @@ export function CommandPalette() {
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.connections, state.status, state.databases, state.cache, state.theme, state.activeTabId]);
+  }, [state.connections, state.sshHosts, state.status, state.databases, state.cache, state.theme, state.activeTabId]);
 
   const filtered = useMemo(() => {
     const query = q.trim().toLowerCase();

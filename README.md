@@ -1,6 +1,6 @@
 # Tusk
 
-A fast, modern desktop client for PostgreSQL. Built with Tauri 2 (Rust) and React.
+A fast, modern desktop client for PostgreSQL, with built-in SSH terminals. Built with Tauri 2 (Rust) and React.
 
 - **Small and quick.** Native Rust backend, about a 10 MB install, opens instantly.
 - **Data grid that scales.** Canvas-rendered, loads rows as you scroll, handles 100k+ row results smoothly.
@@ -23,6 +23,18 @@ Works with PostgreSQL 9.6 and newer (tested against 9.6, 10, 11 and 16).
 | Results | Multiple result sets, messages log, value panel with pretty JSON, find (Ctrl+F), copy cells |
 | Export | CSV (Excel-friendly), JSON, TSV to clipboard, INSERT statements |
 | Everywhere | Command palette (Ctrl+P), query history, dark and light theme, tabs restored on restart |
+
+### SSH terminals
+
+| Area | What's there |
+|---|---|
+| Hosts | Saved SSH hosts in the sidebar, quick fill from `user@host:port` or an `ssh -p 2222 user@host` command, color tags |
+| Auth | Password (with keyboard-interactive fallback), private key files (OpenSSH or PuTTY `.ppk`, with passphrase), SSH agent (Windows OpenSSH agent or Pageant). Secrets go to Windows Credential Manager. |
+| Host keys | Fingerprint confirmation on first connect, remembered afterwards; a clear warning if a server's key changes. Keys already in `~/.ssh/known_hosts` are trusted. |
+| Terminal | xterm.js with GPU rendering, 256 colors and Unicode, clickable links, find (Ctrl+Shift+F), resize follows the window, press Enter to reconnect |
+| Clipboard | Ctrl+C copies a selection (otherwise sends interrupt), Ctrl+V pastes, right-click copies a selection or pastes (PuTTY style) |
+
+In a terminal, Ctrl+W, Ctrl+R and friends go to the shell. Use Ctrl+Shift+T, Ctrl+Shift+W and Ctrl+Shift+P for Tusk's own new tab, close tab and palette.
 
 ### Shortcuts
 
@@ -58,6 +70,7 @@ Windows 10 and 11 already include WebView2, which Tauri uses for the UI.
 ```
 src-tauri/src/
   db.rs        sessions, query execution (simple protocol + Describe for column types), cancel
+  ssh.rs       SSH terminals: connect, host-key checks, auth, PTY shell streamed to the UI
   store.rs     saved connections (JSON in %APPDATA%\dev.tusk.app) + Credential Manager passwords
   lib.rs       Tauri commands
 src/
@@ -65,12 +78,14 @@ src/
   lib/meta.ts  catalog introspection queries, DDL generation
   lib/sql.ts   statement splitter, quoting, formatting, export helpers
   store.ts     app state (zustand)
-  components/  Sidebar, QueryTab, TableTab, DataGrid (Glide), SqlEditor (CodeMirror), dialogs
+  components/  Sidebar, QueryTab, TableTab, TerminalTab (xterm.js), DataGrid (Glide), SqlEditor (CodeMirror), dialogs
 ```
 
 ## Roadmap ideas
 
-- SSH tunnels
+- SFTP file browser beside the terminal
+- SSH tunnels, including PostgreSQL over SSH
+- Local terminals (PowerShell, cmd, WSL) and multi-exec
 - Visual EXPLAIN plan viewer
 - ER diagram
 - Backup / restore via `pg_dump` / `pg_restore`

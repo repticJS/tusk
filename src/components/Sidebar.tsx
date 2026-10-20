@@ -14,11 +14,12 @@ import {
   Search,
   SquareTerminal,
   Table2,
+  TerminalSquare,
   Trash2,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ConnectionConfig } from "../lib/api";
+import type { ConnectionConfig, SshHost } from "../lib/api";
 import * as meta from "../lib/meta";
 import { qualified } from "../lib/sql";
 import { cacheKey, metaSession, useApp } from "../store";
@@ -33,8 +34,11 @@ function compact(n: number): string {
 
 export function Sidebar() {
   const connections = useApp((s) => s.connections);
+  const sshHosts = useApp((s) => s.sshHosts);
   const openConnectionDialog = useApp((s) => s.openConnectionDialog);
+  const openSshDialog = useApp((s) => s.openSshDialog);
   const [filter, setFilter] = useState("");
+  const q = filter.trim().toLowerCase();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [menu, openMenu] = useMenu();
 
@@ -62,7 +66,7 @@ export function Sidebar() {
           <Search size={13} className="text-faint" />
           <input
             className="min-w-0 flex-1 bg-transparent text-[12.5px] outline-none placeholder:text-faint"
-            placeholder="Filter tables…"
+            placeholder="Filter hosts and tables…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             onKeyDown={(e) => e.key === "Escape" && setFilter("")}
@@ -75,7 +79,7 @@ export function Sidebar() {
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto px-1.5 pb-3">
-        {connections.length === 0 && (
+        {connections.length === 0 && sshHosts.length === 0 && (
           <div className="px-3 py-8 text-center text-[12.5px] text-faint">
             No connections yet.
             <br />
@@ -84,19 +88,132 @@ export function Sidebar() {
             </button>
           </div>
         )}
-        {connections.map((c) => (
-          <ConnectionNode
-            key={c.id}
-            conn={c}
-            filter={filter.trim().toLowerCase()}
-            expanded={expanded}
-            toggle={toggle}
-            openMenu={openMenu}
-          />
-        ))}
+        {(sshHosts.length > 0 || connections.length > 0) && (
+          <>
+            <SectionHeader
+              label="SSH"
+              count={sshHosts.length}
+              open={!expanded.has("#ssh-closed")}
+              onToggle={() => toggle("#ssh-closed")}
+              onAdd={() => openSshDialog()}
+            />
+            {!expanded.has("#ssh-closed") &&
+              sshHosts
+                .filter((h) => !q || h.name.toLowerCase().includes(q) || h.host.toLowerCase().includes(q))
+                .map((h) => <SshNode key={h.id} host={h} openMenu={openMenu} />)}
+            <SectionHeader
+              label="PostgreSQL"
+              count={connections.length}
+              open={!expanded.has("#pg-closed")}
+              onToggle={() => toggle("#pg-closed")}
+              onAdd={() => openConnectionDialog()}
+            />
+            {!expanded.has("#pg-closed") &&
+              connections.map((c) => (
+                <ConnectionNode key={c.id} conn={c} filter={q} expanded={expanded} toggle={toggle} openMenu={openMenu} />
+              ))}
+          </>
+        )}
       </div>
       {menu}
     </div>
+  );
+}
+
+function SectionHeader(props: { label: string; count: number; open: boolean; onToggle: () => void; onAdd: () => void }) {
+  return (
+    <div
+      className="group mt-2 flex h-7 cursor-default items-center gap-1 px-1 text-[11px] font-semibold tracking-wider text-faint uppercase first:mt-0 hover:text-muted"
+      onClick={props.onToggle}
+    >
+      <ChevronRight size={11} className={`transition-transform ${props.open ? "rotate-90" : ""}`} />
+      <span className="flex-1">{props.label}</span>
+      <span className="font-normal group-hover:hidden">{props.count || ""}</span>
+      <button
+        className="hidden rounded p-0.5 text-muted group-hover:block hover:bg-hover hover:text-text"
+        title={`New ${props.label} connection`}
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onAdd();
+        }}
+      >
+        <Plus size={13} />
+      </button>
+    </div>
+  );
+}
+
+function SshNode({ host, openMenu }: { host: SshHost; openMenu: NodeProps["openMenu"] }) {
+  const openTerminalTab = useApp((s) => s.openTerminalTab);
+  const openSshDialog = useApp((s) => s.openSshDialog);
+  const deleteSshHost = useApp((s) => s.deleteSshHost);
+  const openTabs = useApp((s) => s.tabs.filter((t) => t.kind === "terminal" && t.hostId === host.id).length);
+  const isActive = useApp((s) => {
+    const t = s.tabs.find((x) => x.id === s.activeTabId);
+    return t?.kind === "terminal" && t.hostId === host.id;
+  });
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const target = `${host.user}@${host.host}${host.port === 22 ? "" : `:${host.port}`}`;
+  return (
+    <>
+      <Row
+        depth={0}
+        active={isActive}
+        icon={
+          <span className="relative">
+            <TerminalSquare size={14} style={{ color: host.color ?? undefined }} />
+            {openTabs > 0 && (
+              <span className="absolute -right-0.5 -bottom-0.5 h-1.5 w-1.5 rounded-full bg-ok ring-2 ring-panel" />
+            )}
+          </span>
+        }
+        label={<span className="font-medium">{host.name}</span>}
+        right={<span className="font-mono">{host.host}</span>}
+        title={`${target}\nClick to open a terminal`}
+        onClick={() => openTerminalTab(host.id)}
+        onContextMenu={(e) =>
+          openMenu(e, [
+            { label: "Open terminal", icon: <TerminalSquare size={13} />, onClick: () => openTerminalTab(host.id) },
+            "separator",
+            { label: "Edit…", icon: <Pencil size={13} />, onClick: () => openSshDialog(host) },
+            {
+              label: "Duplicate",
+              icon: <Copy size={13} />,
+              onClick: () => openSshDialog({ ...host, id: "", name: `${host.name} copy` }),
+            },
+            { label: "Copy ssh command", icon: <Copy size={13} />, onClick: () => void navigator.clipboard.writeText(`ssh ${host.port === 22 ? "" : `-p ${host.port} `}${host.user}@${host.host}`) },
+            { label: "Delete…", icon: <Trash2 size={13} />, danger: true, onClick: () => setConfirmDelete(true) },
+          ])
+        }
+      />
+      {confirmDelete && (
+        <Modal
+          title="Delete SSH host"
+          width={420}
+          onClose={() => setConfirmDelete(false)}
+          footer={
+            <>
+              <button className="btn-outline" onClick={() => setConfirmDelete(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn-danger"
+                onClick={() => {
+                  setConfirmDelete(false);
+                  void deleteSshHost(host.id);
+                }}
+              >
+                Delete
+              </button>
+            </>
+          }
+        >
+          <div className="p-4 text-[13px]">
+            Remove <b>{host.name}</b> ({target}) and its saved credentials from Tusk? Open terminals to it will close.
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }
 

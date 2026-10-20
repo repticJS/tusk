@@ -1,4 +1,4 @@
-import { Database, Moon, Plus, Search, SquareTerminal, Sun, Table2, X } from "lucide-react";
+import { Database, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, X } from "lucide-react";
 import { useEffect } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useShallow } from "zustand/react/shallow";
@@ -6,15 +6,28 @@ import { ConnectionDialog, PasswordPrompt } from "./components/ConnectionDialog"
 import { CommandPalette, HistoryDialog } from "./components/Palette";
 import { QueryTab } from "./components/QueryTab";
 import { Sidebar } from "./components/Sidebar";
+import { HostKeyPrompt, SshDialog, SshSecretPrompt } from "./components/SshDialogs";
 import { TableTab } from "./components/TableTab";
+import { TerminalTab } from "./components/TerminalTab";
 import { useMenu } from "./components/ui";
 import { setPasswordPrompter } from "./lib/api";
 import { activeConnectionOf, useApp, type Tab } from "./store";
+
+/** Ctrl+T / "+": another terminal to the same host, or a query tab on the active database. */
+function newTabLikeActive() {
+  const s = useApp.getState();
+  const tab = s.tabs.find((t) => t.id === s.activeTabId);
+  if (tab?.kind === "terminal") return s.openTerminalTab(tab.hostId);
+  const a = activeConnectionOf(s);
+  if (a) s.openQueryTab(a.connId, a.database);
+  else s.openConnectionDialog();
+}
 
 export default function App() {
   const tabs = useApp((s) => s.tabs);
   const activeTabId = useApp((s) => s.activeTabId);
   const connectionDialog = useApp((s) => s.connectionDialog);
+  const sshDialog = useApp((s) => s.sshDialog);
   const paletteOpen = useApp((s) => s.paletteOpen);
   const historyOpen = useApp((s) => s.historyOpen);
 
@@ -29,20 +42,22 @@ export default function App() {
       const s = useApp.getState();
       const mod = e.ctrlKey || e.metaKey;
       const key = e.key.toLowerCase();
+      const inTerminal = !!(e.target as HTMLElement | null)?.closest?.(".xterm");
       // WebView2 keeps browser shortcuts: reload, find bar, print, view source,
       // downloads. Components handle the ones they use before this runs.
       if (e.key === "F5" || (mod && ["r", "f", "g", "u", "j"].includes(key))) {
         e.preventDefault();
         return;
       }
+      // In a terminal, Ctrl+W/T/P/K belong to the shell; only the Ctrl+Shift
+      // variants (and Ctrl+Tab) reach the app.
+      if (inTerminal && !e.shiftKey && e.key !== "Tab") return;
       if (mod && (key === "p" || key === "k")) {
         e.preventDefault();
         s.setPaletteOpen(!s.paletteOpen);
       } else if (mod && key === "t") {
         e.preventDefault();
-        const a = activeConnectionOf(s);
-        if (a) s.openQueryTab(a.connId, a.database);
-        else s.openConnectionDialog();
+        newTabLikeActive();
       } else if (mod && key === "w") {
         e.preventDefault();
         if (s.activeTabId) s.closeTab(s.activeTabId);
@@ -86,8 +101,10 @@ export default function App() {
                 <div key={t.id} className="absolute inset-0" style={{ display: t.id === activeTabId ? "block" : "none" }}>
                   {t.kind === "query" ? (
                     <QueryTab tab={t} active={t.id === activeTabId} />
-                  ) : (
+                  ) : t.kind === "table" ? (
                     <TableTab tab={t} active={t.id === activeTabId} />
+                  ) : (
+                    <TerminalTab tab={t} active={t.id === activeTabId} />
                   )}
                 </div>
               ))}
@@ -97,7 +114,10 @@ export default function App() {
       </Group>
       <StatusBar />
       {connectionDialog.open && <ConnectionDialog key={connectionDialog.editing?.id ?? "new"} />}
+      {sshDialog.open && <SshDialog key={sshDialog.editing?.id ?? "new"} />}
       <PasswordPrompt />
+      <SshSecretPrompt />
+      <HostKeyPrompt />
       {paletteOpen && <CommandPalette />}
       {historyOpen && <HistoryDialog />}
       <Toast />
@@ -111,7 +131,7 @@ function TabBar() {
   const setActiveTab = useApp((s) => s.setActiveTab);
   const closeTab = useApp((s) => s.closeTab);
   const connections = useApp((s) => s.connections);
-  const openQueryTab = useApp((s) => s.openQueryTab);
+  const sshHosts = useApp((s) => s.sshHosts);
   const [menu, openMenu] = useMenu();
 
   const closeOthers = (keep: Tab) => tabs.filter((t) => t.id !== keep.id).forEach((t) => closeTab(t.id));
@@ -120,7 +140,10 @@ function TabBar() {
     <div className="flex h-10 shrink-0 items-end border-b border-border bg-panel">
       <div className="flex min-w-0 flex-1 items-end overflow-x-auto [scrollbar-width:none]">
         {tabs.map((t) => {
-          const conn = connections.find((c) => c.id === t.connId);
+          const conn =
+            t.kind === "terminal"
+              ? sshHosts.find((h) => h.id === t.hostId)
+              : connections.find((c) => c.id === t.connId);
           const active = t.id === activeTabId;
           return (
             <div
@@ -142,7 +165,7 @@ function TabBar() {
                   { label: "Close all", onClick: () => tabs.forEach((x) => closeTab(x.id)) },
                 ]);
               }}
-              title={`${conn?.name ?? ""} / ${t.database}`}
+              title={t.kind === "terminal" ? `SSH: ${conn?.name ?? ""}` : `${conn?.name ?? ""} / ${t.database}`}
             >
               {/* Connection color strip: red for production makes mistakes harder. */}
               <span
@@ -150,7 +173,13 @@ function TabBar() {
                 style={{ background: active ? (conn?.color ?? "var(--accent)") : "transparent" }}
               />
               <span className="shrink-0" style={{ color: conn?.color ?? undefined }}>
-                {t.kind === "query" ? <SquareTerminal size={13} /> : <Table2 size={13} />}
+                {t.kind === "query" ? (
+                  <SquareTerminal size={13} />
+                ) : t.kind === "table" ? (
+                  <Table2 size={13} />
+                ) : (
+                  <TerminalSquare size={13} />
+                )}
               </span>
               <span className="min-w-0 flex-1 truncate">{t.title}</span>
               <button
@@ -168,11 +197,7 @@ function TabBar() {
       <button
         className="btn-ghost mx-1 mb-1.5 h-7 px-1.5"
         title="New query (Ctrl+T)"
-        onClick={() => {
-          const a = activeConnectionOf(useApp.getState());
-          if (a) openQueryTab(a.connId, a.database);
-          else useApp.getState().openConnectionDialog();
-        }}
+        onClick={newTabLikeActive}
       >
         <Plus size={15} />
       </button>
@@ -183,6 +208,8 @@ function TabBar() {
 
 function Welcome() {
   const connections = useApp((s) => s.connections);
+  const sshHosts = useApp((s) => s.sshHosts);
+  const openTerminalTab = useApp((s) => s.openTerminalTab);
   const status = useApp((s) => s.status);
   const connect = useApp((s) => s.connect);
   const openConnectionDialog = useApp((s) => s.openConnectionDialog);
@@ -207,6 +234,22 @@ function Welcome() {
         </div>
         <div className="mb-2 text-[11.5px] font-semibold tracking-wide text-faint uppercase">Connections</div>
         <div className="mb-8 overflow-hidden rounded-lg border border-border bg-panel">
+          {sshHosts.map((h) => (
+            <button
+              key={h.id}
+              className="flex w-full items-center gap-3 border-b border-border px-4 py-2.5 text-left hover:bg-hover"
+              onClick={() => openTerminalTab(h.id)}
+            >
+              <TerminalSquare size={15} style={{ color: h.color ?? undefined }} />
+              <span className="flex-1">
+                <span className="font-medium">{h.name}</span>
+                <span className="ml-2 text-[12px] text-faint">
+                  ssh {h.user}@{h.host}
+                  {h.port === 22 ? "" : `:${h.port}`}
+                </span>
+              </span>
+            </button>
+          ))}
           {connections.map((c) => (
             <button
               key={c.id}
@@ -250,6 +293,13 @@ function StatusBar() {
   const theme = useApp((s) => s.theme);
   const setTheme = useApp((s) => s.setTheme);
   const setPaletteOpen = useApp((s) => s.setPaletteOpen);
+  const ssh = useApp(
+    useShallow((s) => {
+      const t = s.tabs.find((x) => x.id === s.activeTabId);
+      const h = t?.kind === "terminal" ? s.sshHosts.find((x) => x.id === t.hostId) : undefined;
+      return { name: h?.name, color: h?.color, target: h ? `${h.user}@${h.host}${h.port === 22 ? "" : `:${h.port}`}` : "" };
+    }),
+  );
   const active = useApp(
     useShallow((s) => {
       const a = activeConnectionOf(s);
@@ -259,7 +309,13 @@ function StatusBar() {
   );
   return (
     <div className="flex h-6 shrink-0 items-center gap-3 border-t border-border bg-panel px-3 text-[11.5px] text-muted">
-      {active.name ? (
+      {ssh.name ? (
+        <span className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full" style={{ background: ssh.color ?? "var(--ok)" }} />
+          SSH · {ssh.name}
+          <span className="text-faint">· {ssh.target}</span>
+        </span>
+      ) : active.name ? (
         <span className="flex items-center gap-1.5">
           <span
             className="h-2 w-2 rounded-full"

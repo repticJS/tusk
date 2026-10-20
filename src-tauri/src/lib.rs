@@ -1,8 +1,11 @@
 mod db;
 mod error;
+mod ssh;
 mod store;
 
 use db::{SessionInfo, SessionRef, Sessions, StatementResult};
+use ssh::{SshConfig, SshSessions};
+use tauri::ipc::{Channel, InvokeResponseBody};
 use error::{AppError, AppResult};
 use std::sync::Mutex;
 use store::{ConnectionConfig, Store};
@@ -11,6 +14,7 @@ use tauri::{Manager, State};
 struct AppState {
     store: Mutex<Store>,
     sessions: Sessions,
+    ssh: SshSessions,
 }
 
 impl AppState {
@@ -144,6 +148,86 @@ async fn cancel_query(state: State<'_, AppState>, session: SessionRef) -> AppRes
     }
 }
 
+// ---- SSH ----
+
+#[tauri::command]
+fn list_ssh_hosts(state: State<'_, AppState>) -> Vec<SshConfig> {
+    state.store.lock().unwrap().list_ssh()
+}
+
+/// Saves an SSH host. `secret` (password or key passphrase) of None leaves a
+/// stored one alone.
+#[tauri::command]
+fn save_ssh_host(state: State<'_, AppState>, config: SshConfig, secret: Option<String>) -> AppResult<()> {
+    let id = config.id.clone();
+    let save = config.save_secret;
+    let store = &mut state.store.lock().unwrap();
+    store.upsert_ssh(config)?;
+    if !save {
+        store.set_ssh_secret(&id, None)?;
+        if let Some(s) = secret {
+            state.ssh.transient_secrets.lock().unwrap().insert(id, s);
+        }
+    } else if let Some(s) = secret.as_deref() {
+        store.set_ssh_secret(&id, Some(s))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_ssh_host(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.ssh.transient_secrets.lock().unwrap().remove(&id);
+    state.store.lock().unwrap().delete_ssh(&id)
+}
+
+/// Remembers a password/passphrase typed at a prompt; `save` also stores it.
+#[tauri::command]
+fn set_ssh_secret(state: State<'_, AppState>, id: String, secret: String, save: bool) -> AppResult<()> {
+    if save {
+        state.store.lock().unwrap().set_ssh_secret(&id, Some(&secret))?;
+    }
+    state.ssh.transient_secrets.lock().unwrap().insert(id, secret);
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn ssh_open(
+    state: State<'_, AppState>,
+    term_id: String,
+    host_id: String,
+    cols: u32,
+    rows: u32,
+    accept_fingerprint: Option<String>,
+    events: Channel<InvokeResponseBody>,
+) -> AppResult<()> {
+    let (config, stored, known_hosts) = {
+        let store = state.store.lock().unwrap();
+        (store.get_ssh(&host_id)?, store.get_ssh_secret(&host_id), store.known_hosts_path())
+    };
+    let secret = state.ssh.transient_secrets.lock().unwrap().get(&host_id).cloned().or(stored);
+    let req = ssh::OpenRequest { term_id, config, secret, accept_fingerprint, cols, rows, known_hosts };
+    ssh::open(&state.ssh, req, events).await
+}
+
+#[tauri::command]
+async fn ssh_write(state: State<'_, AppState>, term_id: String, data: String) -> AppResult<()> {
+    state.ssh.write(&term_id, data.into_bytes()).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn ssh_resize(state: State<'_, AppState>, term_id: String, cols: u32, rows: u32) -> AppResult<()> {
+    state.ssh.resize(&term_id, cols, rows).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn ssh_close(state: State<'_, AppState>, term_id: String) -> AppResult<()> {
+    state.ssh.close(&term_id).await;
+    Ok(())
+}
+
 #[tauri::command]
 fn write_text_file(path: String, contents: String) -> AppResult<()> {
     std::fs::write(path, contents).map_err(AppError::from)
@@ -158,9 +242,15 @@ fn read_text_file(path: String) -> AppResult<String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
-            app.manage(AppState { store: Mutex::new(Store::load(dir)), sessions: Sessions::new() });
+            app.manage(AppState {
+                store: Mutex::new(Store::load(dir)),
+                sessions: Sessions::new(),
+                ssh: SshSessions::new(),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -179,6 +269,14 @@ pub fn run() {
             cancel_query,
             write_text_file,
             read_text_file,
+            list_ssh_hosts,
+            save_ssh_host,
+            delete_ssh_host,
+            set_ssh_secret,
+            ssh_open,
+            ssh_write,
+            ssh_resize,
+            ssh_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tusk");

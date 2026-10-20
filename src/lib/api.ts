@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 export type SslMode = "disable" | "prefer" | "require" | "verify-full";
 
@@ -123,6 +123,60 @@ export const api = {
   cancel: (session: SessionRef) => call<void>("cancel_query", { session }),
   writeTextFile: (path: string, contents: string) => call<void>("write_text_file", { path, contents }),
   readTextFile: (path: string) => call<string>("read_text_file", { path }),
+};
+
+// ---- SSH ----
+
+export type SshAuth = "password" | "key" | "agent";
+
+export interface SshHost {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  auth: SshAuth;
+  keyPath?: string | null;
+  color?: string | null;
+  saveSecret: boolean;
+}
+
+export type TermEvent =
+  | { type: "connected"; banner?: string | null }
+  | { type: "exit"; status: number }
+  | { type: "closed"; reason?: string | null };
+
+export const sshApi = {
+  list: () => call<SshHost[]>("list_ssh_hosts"),
+  save: (config: SshHost, secret: string | null) => call<void>("save_ssh_host", { config, secret }),
+  remove: (id: string) => call<void>("delete_ssh_host", { id }),
+  setSecret: (id: string, secret: string, save: boolean) => call<void>("set_ssh_secret", { id, secret, save }),
+  /**
+   * Opens a shell. Output arrives as ArrayBuffers on `onData`; lifecycle
+   * events as objects on `onEvent`. Rejects with DbError for host-key and
+   * auth problems (see `info.kind`).
+   */
+  open(
+    termId: string,
+    hostId: string,
+    cols: number,
+    rows: number,
+    acceptFingerprint: string | null,
+    onData: (bytes: Uint8Array) => void,
+    onEvent: (e: TermEvent) => void,
+  ) {
+    const events = new Channel<ArrayBuffer | TermEvent>();
+    events.onmessage = (m) => {
+      if (m instanceof ArrayBuffer) onData(new Uint8Array(m));
+      else if (ArrayBuffer.isView(m)) onData(new Uint8Array(m.buffer, m.byteOffset, m.byteLength));
+      else if (Array.isArray(m)) onData(new Uint8Array(m as number[]));
+      else onEvent(m);
+    };
+    return call<void>("ssh_open", { termId, hostId, cols, rows, acceptFingerprint, events });
+  },
+  write: (termId: string, data: string) => call<void>("ssh_write", { termId, data }),
+  resize: (termId: string, cols: number, rows: number) => call<void>("ssh_resize", { termId, cols, rows }),
+  close: (termId: string) => call<void>("ssh_close", { termId }),
 };
 
 /** Runs one query and returns its rows as objects; throws on SQL errors. */
