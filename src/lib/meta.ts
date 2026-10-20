@@ -72,6 +72,14 @@ export interface TableDetails {
   viewDefinition: string | null;
 }
 
+// Catalog columns that only exist in newer servers are read through
+// to_json(row)->>'col', which is NULL when the column is missing, so the
+// same queries work from PostgreSQL 9.3 up.
+const NOT_PARTITION = `not coalesce((to_json(c)->>'relispartition')::bool, false)`; // PG 10+
+// prokind is PG 11+; older servers flag aggregates and window functions instead.
+const PROKIND = `coalesce(to_json(p)->>'prokind',
+  case when (to_json(p)->>'proisagg')::bool then 'a' when (to_json(p)->>'proiswindow')::bool then 'w' else 'f' end)`;
+
 export const KIND_LABEL: Record<RelKind, string> = {
   r: "table",
   p: "partitioned table",
@@ -109,15 +117,16 @@ export async function schemaContents(s: SessionRef, schema: string): Promise<Sch
               pg_total_relation_size(c.oid)::text as size,
               obj_description(c.oid, 'pg_class') as comment
        from pg_class c join pg_namespace n on n.oid = c.relnamespace
-       where n.nspname = ${lit} and c.relkind in ('r','p','v','m','f') and not c.relispartition
+       where n.nspname = ${lit} and c.relkind in ('r','p','v','m','f') and ${NOT_PARTITION}
        order by c.relname`,
     ),
     query<Record<string, string | null>>(
       s,
       `select p.oid::text as oid, p.proname as name, pg_get_function_identity_arguments(p.oid) as args,
-              pg_get_function_result(p.oid) as result, p.prokind::text as kind
+              pg_get_function_result(p.oid) as result, k.kind
        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-       where n.nspname = ${lit} and p.prokind in ('f','p')
+       cross join lateral (select ${PROKIND} as kind) k
+       where n.nspname = ${lit} and k.kind in ('f','p')
          and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')
        order by p.proname, 3`,
     ),
@@ -158,7 +167,8 @@ export async function tableDetails(s: SessionRef, schema: string, table: string)
               a.attnotnull::text as notnull, pg_get_expr(d.adbin, d.adrelid) as default,
               (select k.ord::text from pg_index i, unnest(i.indkey) with ordinality k(attnum, ord)
                 where i.indrelid = a.attrelid and i.indisprimary and k.attnum = a.attnum) as pk,
-              a.attidentity::text as identity, a.attgenerated::text as generated,
+              coalesce(to_json(a)->>'attidentity', '') as identity, -- PG 10+
+              coalesce(to_json(a)->>'attgenerated', '') as generated, -- PG 12+
               col_description(a.attrelid, a.attnum) as comment
        from pg_attribute a
        join pg_type t on t.oid = a.atttypid
@@ -244,7 +254,7 @@ export async function completionSchema(
      from pg_class c
      join pg_namespace n on n.oid = c.relnamespace
      left join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
-     where c.relkind in ('r','p','v','m','f') and not c.relispartition
+     where c.relkind in ('r','p','v','m','f') and ${NOT_PARTITION}
        and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname !~ '^pg_'
      order by 1, 2, a.attnum
      limit 100000`,

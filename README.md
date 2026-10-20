@@ -9,6 +9,8 @@ A fast, modern desktop client for PostgreSQL. Built with Tauri 2 (Rust) and Reac
 - **Proper SQL editor.** Postgres syntax, autocomplete from your schema, run the statement under the cursor, errors underlined at the exact position along with Postgres's hint.
 - **Isolated tabs.** Each query tab has its own connection, so a long query or open transaction never blocks the rest of the app. Running transactions are clearly flagged, with Commit and Rollback buttons.
 
+Works with PostgreSQL 9.6 and newer (tested against 9.6, 10, 11 and 16).
+
 ## Features
 
 | Area | What's there |
