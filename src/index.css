@@ -1,0 +1,168 @@
+@import "tailwindcss";
+@import "@glideapps/glide-data-grid/dist/index.css";
+
+/* Theme tokens. Components use the Tailwind names below (bg-panel, text-muted…). */
+:root,
+[data-theme="dark"] {
+  --bg: #0e1014;
+  --panel: #14171c;
+  --panel-2: #1a1e25;
+  --hover: #222730;
+  --border: #262b35;
+  --text: #e4e7ec;
+  --muted: #8a92a0;
+  --faint: #5c6370;
+  --accent: #5b8cff;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(91, 140, 255, 0.16);
+  --danger: #f26d6d;
+  --danger-soft: rgba(242, 109, 109, 0.14);
+  --warn: #e7b350;
+  --warn-soft: rgba(231, 179, 80, 0.16);
+  --ok: #4cc38a;
+  --ok-soft: rgba(76, 195, 138, 0.14);
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #f1f3f6;
+  --hover: #e9ecf1;
+  --border: #dfe3ea;
+  --text: #1c2027;
+  --muted: #646c79;
+  --faint: #9aa1ad;
+  --accent: #3a6df0;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(58, 109, 240, 0.12);
+  --danger: #d64545;
+  --danger-soft: rgba(214, 69, 69, 0.1);
+  --warn: #b7791f;
+  --warn-soft: rgba(231, 179, 80, 0.2);
+  --ok: #23905d;
+  --ok-soft: rgba(35, 144, 93, 0.12);
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-hover: var(--hover);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, "JetBrains Mono", ui-monospace, monospace;
+}
+
+@layer base {
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+input,
+textarea,
+select,
+.cm-editor,
+.selectable {
+  user-select: text;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+}
+
+/* CodeMirror */
+.cm-editor {
+  height: 100%;
+  font-size: 13.5px;
+}
+.cm-editor.cm-focused {
+  outline: none;
+}
+.cm-scroller {
+  font-family: var(--font-mono) !important;
+  line-height: 1.55 !important;
+}
+.cm-error-mark {
+  text-decoration: underline wavy var(--danger);
+  text-underline-offset: 3px;
+  background: var(--danger-soft);
+}
+
+/* Resizable panel handles */
+[data-separator] {
+  background: var(--border);
+  transition: background 120ms;
+}
+[data-separator]:hover,
+[data-separator][data-separator-state="drag"] {
+  background: var(--accent);
+}
+
+@utility field {
+  @apply w-full rounded-md border border-border bg-bg px-2.5 py-1.5 text-[13px] text-text outline-none placeholder:text-faint focus:border-accent;
+}
+@utility btn {
+  @apply inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] font-medium whitespace-nowrap transition-colors disabled:pointer-events-none disabled:opacity-40;
+}
+@utility btn-primary {
+  @apply btn bg-accent text-accent-fg hover:brightness-110;
+}
+@utility btn-ghost {
+  @apply btn text-muted hover:bg-hover hover:text-text;
+}
+@utility btn-outline {
+  @apply btn border border-border text-text hover:bg-hover;
+}
+@utility btn-danger {
+  @apply btn bg-danger text-white hover:brightness-110;
+}
+@utility kbd {
+  @apply rounded border border-border bg-panel-2 px-1.5 py-px font-mono text-[11px] text-muted;
+}

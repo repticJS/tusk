@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#4338ca"/>
+    </linearGradient>
+    <linearGradient id="tusk" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fffbeb"/>
+      <stop offset="1" stop-color="#fcd34d"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <!-- database cylinder -->
+  <g fill="none" stroke="#ffffff" stroke-width="44" stroke-linecap="round">
+    <ellipse cx="430" cy="300" rx="190" ry="70"/>
+    <path d="M240 300v360c0 39 85 70 190 70s190-31 190-70V300"/>
+    <path d="M240 420c0 39 85 70 190 70s190-31 190-70"/>
+    <path d="M240 540c0 39 85 70 190 70s190-31 190-70"/>
+  </g>
+  <!-- tusk -->
+  <path d="M585 560 C 610 800, 840 800, 880 400 C 820 640, 700 680, 660 540 Z" fill="url(#tusk)" stroke="#ffffff" stroke-width="10" stroke-linejoin="round"/>
+</svg>
