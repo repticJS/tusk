@@ -1,4 +1,4 @@
-import { Database, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, X } from "lucide-react";
+import { Database, FileCode2, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, X } from "lucide-react";
 import { useEffect } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useShallow } from "zustand/react/shallow";
@@ -8,8 +8,9 @@ import { QueryTab } from "./components/QueryTab";
 import { Sidebar } from "./components/Sidebar";
 import { HostKeyPrompt, SshDialog, SshSecretPrompt } from "./components/SshDialogs";
 import { TableTab } from "./components/TableTab";
+import { RemoteFileTab } from "./components/RemoteFileTab";
 import { TerminalTab } from "./components/TerminalTab";
-import { useMenu } from "./components/ui";
+import { Modal, useMenu } from "./components/ui";
 import { setPasswordPrompter } from "./lib/api";
 import { activeConnectionOf, useApp, type Tab } from "./store";
 
@@ -60,7 +61,7 @@ export default function App() {
         newTabLikeActive();
       } else if (mod && key === "w") {
         e.preventDefault();
-        if (s.activeTabId) s.closeTab(s.activeTabId);
+        if (s.activeTabId) s.askCloseTab(s.activeTabId);
       } else if (mod && e.key === "Tab") {
         e.preventDefault();
         const i = s.tabs.findIndex((t) => t.id === s.activeTabId);
@@ -103,8 +104,10 @@ export default function App() {
                     <QueryTab tab={t} active={t.id === activeTabId} />
                   ) : t.kind === "table" ? (
                     <TableTab tab={t} active={t.id === activeTabId} />
-                  ) : (
+                  ) : t.kind === "terminal" ? (
                     <TerminalTab tab={t} active={t.id === activeTabId} />
+                  ) : (
+                    <RemoteFileTab tab={t} active={t.id === activeTabId} />
                   )}
                 </div>
               ))}
@@ -118,6 +121,7 @@ export default function App() {
       <PasswordPrompt />
       <SshSecretPrompt />
       <HostKeyPrompt />
+      <UnsavedCloseDialog />
       {paletteOpen && <CommandPalette />}
       {historyOpen && <HistoryDialog />}
       <Toast />
@@ -129,19 +133,21 @@ function TabBar() {
   const tabs = useApp((s) => s.tabs);
   const activeTabId = useApp((s) => s.activeTabId);
   const setActiveTab = useApp((s) => s.setActiveTab);
-  const closeTab = useApp((s) => s.closeTab);
+  const closeTab = useApp((s) => s.askCloseTab);
+  const closeTabs = useApp((s) => s.closeTabs);
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
+  const dirty = useApp((s) => s.dirty);
   const [menu, openMenu] = useMenu();
 
-  const closeOthers = (keep: Tab) => tabs.filter((t) => t.id !== keep.id).forEach((t) => closeTab(t.id));
+  const closeOthers = (keep: Tab) => closeTabs(tabs.filter((t) => t.id !== keep.id).map((t) => t.id));
 
   return (
     <div className="flex h-10 shrink-0 items-end border-b border-border bg-panel">
       <div className="flex min-w-0 flex-1 items-end overflow-x-auto [scrollbar-width:none]">
         {tabs.map((t) => {
           const conn =
-            t.kind === "terminal"
+            t.kind === "terminal" || t.kind === "remote"
               ? sshHosts.find((h) => h.id === t.hostId)
               : connections.find((c) => c.id === t.connId);
           const active = t.id === activeTabId;
@@ -162,10 +168,16 @@ function TabBar() {
                 openMenu(e, [
                   { label: "Close", hint: "Ctrl+W", onClick: () => closeTab(t.id) },
                   { label: "Close others", onClick: () => closeOthers(t) },
-                  { label: "Close all", onClick: () => tabs.forEach((x) => closeTab(x.id)) },
+                  { label: "Close all", onClick: () => closeTabs(tabs.map((x) => x.id)) },
                 ]);
               }}
-              title={t.kind === "terminal" ? `SSH: ${conn?.name ?? ""}` : `${conn?.name ?? ""} / ${t.database}`}
+              title={
+                t.kind === "terminal"
+                  ? `SSH: ${conn?.name ?? ""}`
+                  : t.kind === "remote"
+                    ? `${conn?.name ?? ""}:${t.path}`
+                    : `${conn?.name ?? ""} / ${t.database}`
+              }
             >
               {/* Connection color strip: red for production makes mistakes harder. */}
               <span
@@ -177,11 +189,14 @@ function TabBar() {
                   <SquareTerminal size={13} />
                 ) : t.kind === "table" ? (
                   <Table2 size={13} />
-                ) : (
+                ) : t.kind === "terminal" ? (
                   <TerminalSquare size={13} />
+                ) : (
+                  <FileCode2 size={13} />
                 )}
               </span>
               <span className="min-w-0 flex-1 truncate">{t.title}</span>
+              {dirty[t.id] && <span className="h-2 w-2 shrink-0 rounded-full bg-warn" title="Unsaved changes" />}
               <button
                 className={`shrink-0 rounded p-0.5 hover:bg-hover ${active ? "text-muted" : "opacity-0 group-hover:opacity-100"}`}
                 onMouseDown={(e) => e.stopPropagation()}
@@ -203,6 +218,34 @@ function TabBar() {
       </button>
       {menu}
     </div>
+  );
+}
+
+function UnsavedCloseDialog() {
+  const id = useApp((s) => s.pendingCloseTab);
+  const tab = useApp((s) => s.tabs.find((t) => t.id === s.pendingCloseTab));
+  if (!id || !tab) return null;
+  const cancel = () => useApp.setState({ pendingCloseTab: null });
+  return (
+    <Modal
+      title="Unsaved changes"
+      width={420}
+      onClose={cancel}
+      footer={
+        <>
+          <button className="btn-outline" onClick={cancel}>
+            Keep editing
+          </button>
+          <button className="btn-danger" onClick={() => useApp.getState().closeTab(id)}>
+            Discard changes
+          </button>
+        </>
+      }
+    >
+      <div className="p-4 text-[13px]">
+        <b>{tab.title}</b> has changes that haven't been saved to the server. Close it anyway?
+      </div>
+    </Modal>
   );
 }
 
@@ -296,7 +339,7 @@ function StatusBar() {
   const ssh = useApp(
     useShallow((s) => {
       const t = s.tabs.find((x) => x.id === s.activeTabId);
-      const h = t?.kind === "terminal" ? s.sshHosts.find((x) => x.id === t.hostId) : undefined;
+      const h = t?.kind === "terminal" || t?.kind === "remote" ? s.sshHosts.find((x) => x.id === t.hostId) : undefined;
       return { name: h?.name, color: h?.color, target: h ? `${h.user}@${h.host}${h.port === 22 ? "" : `:${h.port}`}` : "" };
     }),
   );

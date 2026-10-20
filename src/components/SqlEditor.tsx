@@ -91,6 +91,9 @@ export interface SqlEditorProps {
   onSave?: () => void;
   onCreate?: (view: EditorView) => void;
   autoFocus?: boolean;
+  /** Edit something other than SQL: replaces SQL highlighting and completion. */
+  language?: Extension | null;
+  lineWrapping?: boolean;
 }
 
 export function SqlEditor(props: SqlEditorProps) {
@@ -109,13 +112,17 @@ export function SqlEditor(props: SqlEditorProps) {
     ]));
     return [
       keys,
-      sql({ dialect: PostgreSQL, schema: props.schema, defaultSchema: "public", upperCaseKeywords: true }),
-      autocompletion({ activateOnTyping: true, icons: false, maxRenderedOptions: 80 }),
+      props.language !== undefined
+        ? (props.language ?? [])
+        : [
+            sql({ dialect: PostgreSQL, schema: props.schema, defaultSchema: "public", upperCaseKeywords: true }),
+            autocompletion({ activateOnTyping: true, icons: false, maxRenderedOptions: 80 }),
+          ],
       errorField,
       editorTheme(theme === "dark"),
-      EditorView.lineWrapping,
+      props.lineWrapping === false ? [] : EditorView.lineWrapping,
     ];
-  }, [onRun, onRunAll, onSave, props.schema, theme]);
+  }, [onRun, onRunAll, onSave, props.schema, props.language, props.lineWrapping, theme]);
 
   return (
     <CodeMirror

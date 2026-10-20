@@ -1,6 +1,6 @@
 # Tusk
 
-A fast, modern desktop client for PostgreSQL, with built-in SSH terminals. Built with Tauri 2 (Rust) and React.
+A fast, modern desktop client for PostgreSQL, with built-in SSH terminals and SFTP. Built with Tauri 2 (Rust) and React.
 
 - **Small and quick.** Native Rust backend, about a 10 MB install, opens instantly.
 - **Data grid that scales.** Canvas-rendered, loads rows as you scroll, handles 100k+ row results smoothly.
@@ -33,6 +33,16 @@ Works with PostgreSQL 9.6 and newer (tested against 9.6, 10, 11 and 16).
 | Host keys | Fingerprint confirmation on first connect, remembered afterwards; a clear warning if a server's key changes. Keys already in `~/.ssh/known_hosts` are trusted. |
 | Terminal | xterm.js with GPU rendering, 256 colors and Unicode, clickable links, find (Ctrl+Shift+F), resize follows the window, press Enter to reconnect |
 | Clipboard | Ctrl+C copies a selection (otherwise sends interrupt), Ctrl+V pastes, right-click copies a selection or pastes (PuTTY style) |
+
+### SFTP file panel
+
+Every terminal tab has a file panel (toggle with **Files**) that works over the same SSH connection, with no second login.
+
+| Area | What's there |
+|---|---|
+| Browsing | Follows the terminal's current folder as you `cd` (Linux servers), path bar, home, parent, hidden-files toggle, symlinks |
+| Transfers | Drag files or folders from Explorer to upload, Download… to a folder of your choice, recursive folders, progress and cancel |
+| Files | Double-click to edit remote text files with syntax highlighting (YAML, nginx, shell, JSON, Python, …) and Ctrl+S to save back; rename (F2), new folder, delete (Del) |
 
 In a terminal, Ctrl+W, Ctrl+R and friends go to the shell. Use Ctrl+Shift+T, Ctrl+Shift+W and Ctrl+Shift+P for Tusk's own new tab, close tab and palette.
 
@@ -71,6 +81,7 @@ Windows 10 and 11 already include WebView2, which Tauri uses for the UI.
 src-tauri/src/
   db.rs        sessions, query execution (simple protocol + Describe for column types), cancel
   ssh.rs       SSH terminals: connect, host-key checks, auth, PTY shell streamed to the UI
+  sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
   store.rs     saved connections (JSON in %APPDATA%\dev.tusk.app) + Credential Manager passwords
   lib.rs       Tauri commands
 src/
@@ -78,12 +89,11 @@ src/
   lib/meta.ts  catalog introspection queries, DDL generation
   lib/sql.ts   statement splitter, quoting, formatting, export helpers
   store.ts     app state (zustand)
-  components/  Sidebar, QueryTab, TableTab, TerminalTab (xterm.js), DataGrid (Glide), SqlEditor (CodeMirror), dialogs
+  components/  Sidebar, QueryTab, TableTab, TerminalTab (xterm.js), SftpPanel, RemoteFileTab, DataGrid (Glide), SqlEditor (CodeMirror), dialogs
 ```
 
 ## Roadmap ideas
 
-- SFTP file browser beside the terminal
 - SSH tunnels, including PostgreSQL over SSH
 - Local terminals (PowerShell, cmd, WSL) and multi-exec
 - Visual EXPLAIN plan viewer

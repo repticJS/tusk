@@ -179,6 +179,60 @@ export const sshApi = {
   close: (termId: string) => call<void>("ssh_close", { termId }),
 };
 
+// ---- SFTP ----
+
+export interface SftpEntry {
+  name: string;
+  kind: "dir" | "file" | "link";
+  linkToDir: boolean;
+  size: number;
+  mtime?: number | null;
+  mode: string;
+  owner?: string | null;
+}
+
+export interface SftpListing {
+  path: string;
+  entries: SftpEntry[];
+}
+
+export interface TransferProgress {
+  type: "progress";
+  done: number;
+  total: number;
+  file: string;
+}
+
+export const sftpApi = {
+  list: (termId: string, path: string) => call<SftpListing>("sftp_list", { termId, path }),
+  cwd: (termId: string) => call<string | null>("sftp_cwd", { termId }),
+  mkdir: (termId: string, path: string) => call<void>("sftp_mkdir", { termId, path }),
+  rename: (termId: string, from: string, to: string) => call<void>("sftp_rename", { termId, from, to }),
+  remove: (termId: string, paths: string[]) => call<void>("sftp_delete", { termId, paths }),
+  readText: (termId: string, path: string) =>
+    call<{ content?: string | null; size: number; reason?: string | null }>("sftp_read_text", { termId, path }),
+  writeText: (termId: string, path: string, content: string) => call<void>("sftp_write_text", { termId, path, content }),
+  download(termId: string, transferId: string, remote: string[], localDir: string, onProgress: (p: TransferProgress) => void) {
+    const events = new Channel<TransferProgress>();
+    events.onmessage = onProgress;
+    return call<void>("sftp_download", { termId, transferId, remote, localDir, events });
+  },
+  upload(termId: string, transferId: string, local: string[], remoteDir: string, onProgress: (p: TransferProgress) => void) {
+    const events = new Channel<TransferProgress>();
+    events.onmessage = onProgress;
+    return call<void>("sftp_upload", { termId, transferId, local, remoteDir, events });
+  },
+  cancel: (transferId: string) => call<void>("sftp_cancel", { transferId }),
+};
+
+/** Joins a remote POSIX directory and name. */
+export const remoteJoin = (dir: string, name: string) => (dir.endsWith("/") ? dir + name : `${dir}/${name}`);
+export const remoteParent = (path: string) => {
+  const trimmed = path.replace(/\/+$/, "");
+  const i = trimmed.lastIndexOf("/");
+  return i <= 0 ? "/" : trimmed.slice(0, i);
+};
+
 /** Runs one query and returns its rows as objects; throws on SQL errors. */
 export async function query<T = Record<string, string | null>>(
   session: SessionRef,

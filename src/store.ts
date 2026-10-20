@@ -31,11 +31,27 @@ export interface TerminalTab {
   hostId: string;
 }
 
+/** A remote file opened for editing over a terminal's SFTP connection. */
+export interface RemoteFileTab {
+  id: string;
+  kind: "remote";
+  title: string;
+  termId: string;
+  hostId: string;
+  path: string;
+}
+
 /** Tabs bound to a database connection. */
 export type DbTab = QueryTab | TableTab;
-export type Tab = DbTab | TerminalTab;
+export type Tab = DbTab | TerminalTab | RemoteFileTab;
 
-export const isDbTab = (t: Tab | undefined): t is DbTab => !!t && t.kind !== "terminal";
+export const isDbTab = (t: Tab | undefined): t is DbTab => !!t && (t.kind === "query" || t.kind === "table");
+
+export interface FilePanelPrefs {
+  open: boolean;
+  follow: boolean;
+  showHidden: boolean;
+}
 
 export interface HistoryEntry {
   sql: string;
@@ -79,6 +95,7 @@ export interface HostKeyRequest {
 interface State {
   theme: "dark" | "light";
   rowLimit: number;
+  filePanel: FilePanelPrefs;
   connections: ConnectionConfig[];
   sshHosts: SshHost[];
   status: Record<string, ConnStatus | undefined>;
@@ -86,6 +103,10 @@ interface State {
   cache: Record<string, DbCache | undefined>;
   tabs: Tab[];
   activeTabId: string | null;
+  /** Tabs with unsaved edits (remote files). */
+  dirty: Record<string, boolean | undefined>;
+  /** A tab with unsaved edits the user asked to close. */
+  pendingCloseTab: string | null;
   history: HistoryEntry[];
 
   connectionDialog: { open: boolean; editing?: ConnectionConfig };
@@ -106,6 +127,9 @@ interface State {
   closeSshDialog(): void;
   deleteSshHost(id: string): Promise<void>;
   openTerminalTab(hostId: string): void;
+  openRemoteFile(termId: string, hostId: string, path: string): void;
+  setFilePanel(patch: Partial<FilePanelPrefs>): void;
+  setDirty(id: string, dirty: boolean): void;
   requestSshSecret(r: Omit<SshSecretRequest, "resolve">): Promise<{ secret: string; save: boolean } | null>;
   resolveSshSecret(r: { secret: string; save: boolean } | null): void;
   requestHostKey(r: Omit<HostKeyRequest, "resolve">): Promise<boolean>;
@@ -122,6 +146,10 @@ interface State {
   openTableTab(connId: string, database: string, schema: string, name: string, kind: meta.RelKind): void;
   updateTab(id: string, patch: Partial<QueryTab>): void;
   closeTab(id: string): void;
+  /** Closes a tab, asking first if it has unsaved edits. */
+  askCloseTab(id: string): void;
+  /** Closes several tabs, keeping (and reporting) ones with unsaved edits. */
+  closeTabs(ids: string[]): void;
   setActiveTab(id: string): void;
   addHistory(e: HistoryEntry): void;
   clearHistory(): void;
@@ -155,6 +183,7 @@ export const useApp = create<State>()(
     (set, get) => ({
       theme: "dark",
       rowLimit: 10000,
+      filePanel: { open: true, follow: true, showHidden: false },
       connections: [],
       sshHosts: [],
       status: {},
@@ -162,6 +191,8 @@ export const useApp = create<State>()(
       cache: {},
       tabs: [],
       activeTabId: null,
+      dirty: {},
+      pendingCloseTab: null,
       history: [],
       connectionDialog: { open: false },
       sshDialog: { open: false },
@@ -183,7 +214,7 @@ export const useApp = create<State>()(
         const [connections, sshHosts] = await Promise.all([api.listConnections(), sshApi.list()]);
         // Drop tabs whose connection or host no longer exists.
         const ids = new Set([...connections.map((c) => c.id), ...sshHosts.map((h) => h.id)]);
-        const tabs = get().tabs.filter((t) => ids.has(t.kind === "terminal" ? t.hostId : t.connId));
+        const tabs = get().tabs.filter((t) => ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId));
         const activeTabId = tabs.some((t) => t.id === get().activeTabId)
           ? get().activeTabId
           : (tabs[0]?.id ?? null);
@@ -198,7 +229,7 @@ export const useApp = create<State>()(
       async deleteSshHost(id) {
         await sshApi.remove(id);
         set((s) => {
-          const tabs = s.tabs.filter((t) => !(t.kind === "terminal" && t.hostId === id));
+          const tabs = s.tabs.filter((t) => !((t.kind === "terminal" || t.kind === "remote") && t.hostId === id));
           return {
             tabs,
             activeTabId: tabs.some((t) => t.id === s.activeTabId) ? s.activeTabId : (tabs[0]?.id ?? null),
@@ -214,6 +245,19 @@ export const useApp = create<State>()(
         const id = uid();
         const tab: TerminalTab = { id, kind: "terminal", hostId, title: same ? `${host.name} (${same + 1})` : host.name };
         set((s) => ({ tabs: [...s.tabs, tab], activeTabId: id }));
+      },
+
+      openRemoteFile(termId, hostId, path) {
+        const existing = get().tabs.find((t) => t.kind === "remote" && t.termId === termId && t.path === path);
+        if (existing) return set({ activeTabId: existing.id });
+        const id = uid();
+        const tab: RemoteFileTab = { id, kind: "remote", termId, hostId, path, title: path.split("/").pop() || path };
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: id }));
+      },
+
+      setFilePanel: (patch) => set((s) => ({ filePanel: { ...s.filePanel, ...patch } })),
+      setDirty: (id, dirty) => {
+        if (!!get().dirty[id] !== dirty) set((s) => ({ dirty: { ...s.dirty, [id]: dirty } }));
       },
 
       requestSshSecret(r) {
@@ -365,8 +409,20 @@ export const useApp = create<State>()(
           const tabs = s.tabs.filter((t) => t.id !== id);
           let activeTabId = s.activeTabId;
           if (activeTabId === id) activeTabId = tabs[Math.min(idx, tabs.length - 1)]?.id ?? null;
-          return { tabs, activeTabId };
+          const { [id]: _, ...dirty } = s.dirty;
+          return { tabs, activeTabId, dirty, pendingCloseTab: s.pendingCloseTab === id ? null : s.pendingCloseTab };
         });
+      },
+
+      askCloseTab(id) {
+        if (get().dirty[id]) set({ pendingCloseTab: id, activeTabId: id });
+        else get().closeTab(id);
+      },
+
+      closeTabs(ids) {
+        const kept = ids.filter((id) => get().dirty[id]);
+        ids.filter((id) => !get().dirty[id]).forEach((id) => get().closeTab(id));
+        if (kept.length) get().showToast(`Kept ${kept.length} tab(s) with unsaved changes open`, "info");
       },
 
       setActiveTab: (id) => set({ activeTabId: id }),
@@ -407,9 +463,10 @@ export const useApp = create<State>()(
       partialize: (s) => ({
         theme: s.theme,
         rowLimit: s.rowLimit,
-        // Terminal sessions don't survive a restart, so their tabs aren't restored.
-        tabs: s.tabs.filter((t) => t.kind !== "terminal"),
-        activeTabId: s.tabs.find((t) => t.id === s.activeTabId)?.kind === "terminal" ? null : s.activeTabId,
+        filePanel: s.filePanel,
+        // SSH sessions don't survive a restart, so their tabs aren't restored.
+        tabs: s.tabs.filter((t) => isDbTab(t)),
+        activeTabId: isDbTab(s.tabs.find((t) => t.id === s.activeTabId)) ? s.activeTabId : null,
         history: s.history,
       }),
     },

@@ -1,5 +1,6 @@
 mod db;
 mod error;
+mod sftp;
 mod ssh;
 mod store;
 
@@ -15,6 +16,7 @@ struct AppState {
     store: Mutex<Store>,
     sessions: Sessions,
     ssh: SshSessions,
+    transfers: sftp::Transfers,
 }
 
 impl AppState {
@@ -228,6 +230,75 @@ async fn ssh_close(state: State<'_, AppState>, term_id: String) -> AppResult<()>
     Ok(())
 }
 
+// ---- SFTP (over a terminal's connection) ----
+
+#[tauri::command]
+async fn sftp_list(state: State<'_, AppState>, term_id: String, path: String) -> AppResult<sftp::Listing> {
+    sftp::list(&*state.ssh.connection(&term_id).await?, &path).await
+}
+
+/// The terminal shell's current directory, if the server lets us find it.
+#[tauri::command]
+async fn sftp_cwd(state: State<'_, AppState>, term_id: String) -> AppResult<Option<String>> {
+    sftp::shell_cwd(&*state.ssh.connection(&term_id).await?).await
+}
+
+#[tauri::command]
+async fn sftp_mkdir(state: State<'_, AppState>, term_id: String, path: String) -> AppResult<()> {
+    sftp::mkdir(&*state.ssh.connection(&term_id).await?, &path).await
+}
+
+#[tauri::command]
+async fn sftp_rename(state: State<'_, AppState>, term_id: String, from: String, to: String) -> AppResult<()> {
+    sftp::rename(&*state.ssh.connection(&term_id).await?, &from, &to).await
+}
+
+#[tauri::command]
+async fn sftp_delete(state: State<'_, AppState>, term_id: String, paths: Vec<String>) -> AppResult<()> {
+    sftp::delete(&*state.ssh.connection(&term_id).await?, &paths).await
+}
+
+#[tauri::command]
+async fn sftp_read_text(state: State<'_, AppState>, term_id: String, path: String) -> AppResult<sftp::TextFile> {
+    sftp::read_text(&*state.ssh.connection(&term_id).await?, &path).await
+}
+
+#[tauri::command]
+async fn sftp_write_text(state: State<'_, AppState>, term_id: String, path: String, content: String) -> AppResult<()> {
+    sftp::write_text(&*state.ssh.connection(&term_id).await?, &path, &content).await
+}
+
+#[tauri::command]
+async fn sftp_download(
+    state: State<'_, AppState>,
+    term_id: String,
+    transfer_id: String,
+    remote: Vec<String>,
+    local_dir: String,
+    events: Channel<sftp::Progress>,
+) -> AppResult<()> {
+    let conn = state.ssh.connection(&term_id).await?;
+    sftp::download(&conn, &state.transfers, &transfer_id, &remote, &local_dir, events).await
+}
+
+#[tauri::command]
+async fn sftp_upload(
+    state: State<'_, AppState>,
+    term_id: String,
+    transfer_id: String,
+    local: Vec<String>,
+    remote_dir: String,
+    events: Channel<sftp::Progress>,
+) -> AppResult<()> {
+    let conn = state.ssh.connection(&term_id).await?;
+    sftp::upload(&conn, &state.transfers, &transfer_id, &local, &remote_dir, events).await
+}
+
+#[tauri::command]
+fn sftp_cancel(state: State<'_, AppState>, transfer_id: String) {
+    state.transfers.cancel(&transfer_id);
+}
+
 #[tauri::command]
 fn write_text_file(path: String, contents: String) -> AppResult<()> {
     std::fs::write(path, contents).map_err(AppError::from)
@@ -250,6 +321,7 @@ pub fn run() {
                 store: Mutex::new(Store::load(dir)),
                 sessions: Sessions::new(),
                 ssh: SshSessions::new(),
+                transfers: sftp::Transfers::default(),
             });
             Ok(())
         })
@@ -277,6 +349,16 @@ pub fn run() {
             ssh_write,
             ssh_resize,
             ssh_close,
+            sftp_list,
+            sftp_cwd,
+            sftp_mkdir,
+            sftp_rename,
+            sftp_delete,
+            sftp_read_text,
+            sftp_write_text,
+            sftp_download,
+            sftp_upload,
+            sftp_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tusk");

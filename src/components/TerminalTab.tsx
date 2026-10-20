@@ -7,10 +7,12 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { ChevronDown, ChevronUp, RotateCw, Search, X } from "lucide-react";
+import { ChevronDown, ChevronUp, FolderTree, RotateCw, Search, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import { DbError, sshApi } from "../lib/api";
 import { useApp, type TerminalTab as TerminalTabT } from "../store";
+import { SftpPanel } from "./SftpPanel";
 import { Spinner } from "./ui";
 
 type ConnState = "connecting" | "connected" | "closed";
@@ -77,6 +79,9 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
   const stateRef = useRef<ConnState>("connecting");
   const [state, setStateRaw] = useState<ConnState>("connecting");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [followSignal, setFollowSignal] = useState(0);
+  const filesOpen = useApp((s) => s.filePanel.open);
+  const setFilePanel = useApp((s) => s.setFilePanel);
   const [query, setQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -206,9 +211,32 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
       return true;
     });
 
+    // Tauri runs commands concurrently, so separate write calls can reach the
+    // channel out of order. Keep one write in flight and batch keys typed
+    // meanwhile, so input always arrives in the order it was typed.
+    let pending = "";
+    let writing = false;
+    const flush = async () => {
+      if (writing || !pending) return;
+      writing = true;
+      const chunk = pending;
+      pending = "";
+      try {
+        await sshApi.write(tab.id, chunk);
+      } catch {
+        // The connection dropped; the closed event reports it.
+      } finally {
+        writing = false;
+        void flush();
+      }
+    };
+
     term.onData((data) => {
       if (stateRef.current === "connected") {
-        void sshApi.write(tab.id, data);
+        pending += data;
+        void flush();
+        // A command was probably run; let the file panel check the shell's folder.
+        if (data.includes("\r")) setFollowSignal((n) => n + 1);
       } else if (stateRef.current === "closed" && (data === "\r" || data.toLowerCase() === "r")) {
         void connect();
       }
@@ -275,7 +303,10 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
   };
 
   const find = (dir: "next" | "prev") => {
-    const opts = { caseSensitive: false, decorations: { matchOverviewRuler: "#e7b350", activeMatchColorOverviewRuler: "#5b8cff" } };
+    const opts = {
+      caseSensitive: false,
+      decorations: { matchOverviewRuler: "#e7b350", activeMatchColorOverviewRuler: "#5b8cff" },
+    };
     if (dir === "next") searchRef.current?.findNext(query, opts);
     else searchRef.current?.findPrevious(query, opts);
   };
@@ -283,7 +314,11 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
   const target = host ? `${host.user}@${host.host}${host.port === 22 ? "" : `:${host.port}`}` : "";
 
   return (
-    <div className="flex h-full flex-col" style={{ background: theme === "dark" ? DARK.background : LIGHT.background }}>
+    <div
+      className="flex h-full flex-col"
+      style={{ background: theme === "dark" ? DARK.background : LIGHT.background }}
+      data-term-id={tab.id}
+    >
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-panel px-3 text-[12px]">
         <span
           className={`h-2 w-2 rounded-full ${state === "connected" ? "bg-ok" : state === "connecting" ? "bg-warn" : "bg-faint"}`}
@@ -298,6 +333,13 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
           </button>
         )}
         <button
+          className={`btn-ghost h-6 px-1.5 ${filesOpen ? "text-accent" : ""}`}
+          title={filesOpen ? "Hide files" : "Show files (SFTP)"}
+          onClick={() => setFilePanel({ open: !filesOpen })}
+        >
+          <FolderTree size={13} /> Files
+        </button>
+        <button
           className="btn-ghost h-6 px-1.5"
           title="Find (Ctrl+Shift+F)"
           onClick={() => {
@@ -308,48 +350,66 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
           <Search size={13} />
         </button>
       </div>
-      <div className="relative min-h-0 flex-1">
-        {searchOpen && (
-          <div className="absolute top-2 right-4 z-10 flex items-center gap-1 rounded-lg border border-border bg-panel p-1 shadow-xl">
-            <input
-              ref={searchInputRef}
-              className="h-7 w-56 rounded bg-bg px-2 text-[12.5px] outline-none"
-              placeholder="Find in terminal"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") find(e.shiftKey ? "prev" : "next");
-                if (e.key === "Escape") {
-                  setSearchOpen(false);
-                  searchRef.current?.clearDecorations();
-                  termRef.current?.focus();
-                }
-              }}
-            />
-            <button className="btn-ghost h-7 px-1.5" onClick={() => find("prev")} title="Previous (Shift+Enter)">
-              <ChevronUp size={14} />
-            </button>
-            <button className="btn-ghost h-7 px-1.5" onClick={() => find("next")} title="Next (Enter)">
-              <ChevronDown size={14} />
-            </button>
-            <button
-              className="btn-ghost h-7 px-1.5"
-              onClick={() => {
-                setSearchOpen(false);
-                searchRef.current?.clearDecorations();
-                termRef.current?.focus();
-              }}
-            >
-              <X size={14} />
-            </button>
-          </div>
+      <Group orientation="horizontal" className="min-h-0 flex-1">
+        {filesOpen && (
+          <>
+            <Panel defaultSize="300px" minSize="200px" maxSize="60%">
+              <SftpPanel
+                termId={tab.id}
+                hostId={tab.hostId}
+                connected={state === "connected"}
+                followSignal={followSignal}
+                visible={active}
+              />
+            </Panel>
+            <Separator className="w-px" />
+          </>
         )}
-        {/* Padding lives on the wrapper: the measured box must never grow scrollbars,
+        <Panel minSize="200px">
+          <div className="relative h-full">
+            {searchOpen && (
+              <div className="absolute top-2 right-4 z-10 flex items-center gap-1 rounded-lg border border-border bg-panel p-1 shadow-xl">
+                <input
+                  ref={searchInputRef}
+                  className="h-7 w-56 rounded bg-bg px-2 text-[12.5px] outline-none"
+                  placeholder="Find in terminal"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") find(e.shiftKey ? "prev" : "next");
+                    if (e.key === "Escape") {
+                      setSearchOpen(false);
+                      searchRef.current?.clearDecorations();
+                      termRef.current?.focus();
+                    }
+                  }}
+                />
+                <button className="btn-ghost h-7 px-1.5" onClick={() => find("prev")} title="Previous (Shift+Enter)">
+                  <ChevronUp size={14} />
+                </button>
+                <button className="btn-ghost h-7 px-1.5" onClick={() => find("next")} title="Next (Enter)">
+                  <ChevronDown size={14} />
+                </button>
+                <button
+                  className="btn-ghost h-7 px-1.5"
+                  onClick={() => {
+                    setSearchOpen(false);
+                    searchRef.current?.clearDecorations();
+                    termRef.current?.focus();
+                  }}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+            {/* Padding lives on the wrapper: the measured box must never grow scrollbars,
             or fitting the terminal and the scrollbar appearing resize each other forever. */}
-        <div className="absolute inset-0 py-1 pl-2" onContextMenu={(e) => void onContextMenu(e)}>
-          <div ref={containerRef} className="tusk-terminal h-full w-full overflow-hidden" />
-        </div>
-      </div>
+            <div className="absolute inset-0 py-1 pl-2" onContextMenu={(e) => void onContextMenu(e)}>
+              <div ref={containerRef} className="tusk-terminal h-full w-full overflow-hidden" />
+            </div>
+          </div>
+        </Panel>
+      </Group>
     </div>
   );
 }

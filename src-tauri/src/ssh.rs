@@ -55,6 +55,14 @@ enum Cmd {
 
 struct Terminal {
     tx: mpsc::UnboundedSender<Cmd>,
+    /// The connection, shared with SFTP and helper exec channels.
+    conn: Arc<Connection>,
+}
+
+/// One authenticated SSH connection. SFTP is opened on it lazily.
+pub struct Connection {
+    pub handle: Handle<Client>,
+    pub sftp: tokio::sync::Mutex<Option<Arc<russh_sftp::client::SftpSession>>>,
 }
 
 pub struct SshSessions {
@@ -80,6 +88,13 @@ impl SshSessions {
         }
     }
 
+    pub async fn connection(&self, id: &str) -> AppResult<Arc<Connection>> {
+        match self.terms.lock().await.get(id) {
+            Some(t) if !t.conn.handle.is_closed() => Ok(t.conn.clone()),
+            _ => Err(AppError::kind("SSH_CLOSED", "The SSH connection for this terminal is closed. Reconnect it first.")),
+        }
+    }
+
     pub async fn close(&self, id: &str) {
         if let Some(t) = self.terms.lock().await.remove(id) {
             let _ = t.tx.send(Cmd::Close);
@@ -95,7 +110,7 @@ enum HostKeyIssue {
     Changed { fingerprint: String, algorithm: String, line: usize },
 }
 
-struct Client {
+pub struct Client {
     host: String,
     port: u16,
     known_hosts: PathBuf,
@@ -357,7 +372,8 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
     channel.request_shell(false).await.map_err(ssh_err)?;
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
-    sessions.terms.lock().await.insert(req.term_id.clone(), Terminal { tx });
+    let conn = Arc::new(Connection { handle, sftp: Default::default() });
+    sessions.terms.lock().await.insert(req.term_id.clone(), Terminal { tx, conn: conn.clone() });
 
     let banner = banner.lock().unwrap().take();
     let _ = events.send(json(&TermEvent::Connected { banner }));
@@ -396,7 +412,7 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
                 },
             }
         }
-        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        let _ = conn.handle.disconnect(Disconnect::ByApplication, "", "en").await;
         let _ = events.send(json(&TermEvent::Closed { reason }));
     });
     Ok(())
