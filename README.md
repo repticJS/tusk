@@ -28,7 +28,7 @@ Works with PostgreSQL 9.6 and newer (tested against 9.6, 10, 11 and 16).
 
 | Area | What's there |
 |---|---|
-| Hosts | Saved SSH hosts in the sidebar, quick fill from `user@host:port` or an `ssh -p 2222 user@host` command, color tags |
+| Hosts | Saved SSH hosts in the sidebar, quick fill from `user@host:port` or an `ssh -p 2222 user@host` command, color tags, optional start folder (the shell and file panel open there) |
 | Auth | Password (with keyboard-interactive fallback), private key files (OpenSSH or PuTTY `.ppk`, with passphrase), SSH agent (Windows OpenSSH agent or Pageant). Secrets go to Windows Credential Manager. |
 | Host keys | Fingerprint confirmation on first connect, remembered afterwards; a clear warning if a server's key changes. Keys already in `~/.ssh/known_hosts` are trusted. |
 | Terminal | xterm.js with GPU rendering, 256 colors and Unicode, clickable links, find (Ctrl+Shift+F), resize follows the window, press Enter to reconnect |

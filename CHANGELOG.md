@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+- SSH hosts can have a start folder (e.g. /home/New Webapp): the terminal and file panel open there when you connect. Set it in the host's settings, or right-click a folder in the file panel and choose "Use as start folder".
+
 ## 0.2.1
 
 - After an update, Tusk now confirms it on the next launch ("Updated to Tusk 0.2.1").

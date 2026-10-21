@@ -37,6 +37,9 @@ pub struct SshConfig {
     /// Save the password (or key passphrase) in the credential store.
     #[serde(default)]
     pub save_secret: bool,
+    /// Folder the shell starts in, e.g. "/home/New Webapp" or "~/apps".
+    #[serde(default)]
+    pub start_dir: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -369,7 +372,12 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
         .request_pty(false, "xterm-256color", req.cols.max(1), req.rows.max(1), 0, 0, &[])
         .await
         .map_err(ssh_err)?;
-    channel.request_shell(false).await.map_err(ssh_err)?;
+    match cfg.start_dir.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        // Start the login shell inside the folder rather than typing a `cd`
+        // into it, so nothing shows on screen or in the shell history.
+        Some(dir) => channel.exec(false, start_in_dir_command(dir)).await.map_err(ssh_err)?,
+        None => channel.request_shell(false).await.map_err(ssh_err)?,
+    }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();
     let conn = Arc::new(Connection { handle, sftp: Default::default() });
@@ -418,6 +426,42 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
     Ok(())
 }
 
+/// Quotes a string for a POSIX shell.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// A command that changes to `dir` (keeping `~` meaning home) and then
+/// replaces itself with the user's login shell.
+fn start_in_dir_command(dir: &str) -> String {
+    let target = if dir == "~" {
+        "~".to_string()
+    } else if let Some(rest) = dir.strip_prefix("~/") {
+        format!("~/{}", sh_quote(rest))
+    } else {
+        sh_quote(dir)
+    };
+    format!(
+        "cd {target} 2>/dev/null || printf '%s\\n' {msg} >&2; exec \"${{SHELL:-/bin/sh}}\" -l",
+        msg = sh_quote(&format!("Tusk: start folder {dir} not found, staying in your home folder")),
+    )
+}
+
 fn json<T: Serialize>(v: &T) -> InvokeResponseBody {
     InvokeResponseBody::Json(serde_json::to_string(v).unwrap_or_else(|_| "null".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_start_folder_commands() {
+        assert_eq!(sh_quote("it's"), r"'it'\''s'");
+        let cmd = start_in_dir_command("/home/New Webapp");
+        assert!(cmd.starts_with("cd '/home/New Webapp' 2>/dev/null ||"), "{cmd}");
+        assert!(cmd.ends_with(r#"exec "${SHELL:-/bin/sh}" -l"#), "{cmd}");
+        assert!(start_in_dir_command("~/apps/my app").starts_with("cd ~/'apps/my app' "));
+        assert!(start_in_dir_command("~").starts_with("cd ~ "));
+    }
 }

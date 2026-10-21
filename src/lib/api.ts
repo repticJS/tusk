@@ -139,6 +139,8 @@ export interface SshHost {
   keyPath?: string | null;
   color?: string | null;
   saveSecret: boolean;
+  /** Folder the shell starts in, e.g. "/home/New Webapp" or "~/apps". */
+  startDir?: string | null;
 }
 
 export type TermEvent =

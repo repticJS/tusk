@@ -181,6 +181,15 @@ export function SshDialog() {
         <Field label="User">
           <input className="field" value={cfg.user} placeholder="root" onChange={(e) => set("user", e.target.value)} spellCheck={false} />
         </Field>
+        <Field label="Start folder (optional)" hint="The terminal and file panel open here. Leave empty for your home folder.">
+          <input
+            className="field font-mono text-[12px]"
+            value={cfg.startDir ?? ""}
+            placeholder="/home/New Webapp"
+            onChange={(e) => set("startDir", e.target.value)}
+            spellCheck={false}
+          />
+        </Field>
         <Field label="Authentication">
           <div className="flex rounded-md border border-border p-0.5">
             {(

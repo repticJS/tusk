@@ -22,7 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { remoteJoin, remoteParent, sftpApi, type SftpEntry } from "../lib/api";
+import { remoteJoin, remoteParent, sftpApi, sshApi, type SftpEntry } from "../lib/api";
 import { formatBytes } from "../lib/sql";
 import { useApp } from "../store";
 import { Modal, Spinner, useMenu, type MenuEntry } from "./ui";
@@ -65,6 +65,7 @@ export function SftpPanel(props: {
   const setFilePanel = useApp((s) => s.setFilePanel);
   const showToast = useApp((s) => s.showToast);
   const openRemoteFile = useApp((s) => s.openRemoteFile);
+  const host = useApp((s) => s.sshHosts.find((h) => h.id === hostId));
 
   const [path, setPath] = useState("");
   const [pathDraft, setPathDraft] = useState("");
@@ -84,7 +85,7 @@ export function SftpPanel(props: {
   pathRef.current = path;
 
   const load = useCallback(
-    async (target: string, keepSelection = false) => {
+    async (target: string, keepSelection = false): Promise<boolean> => {
       setLoading(true);
       try {
         const listing = await sftpApi.list(termId, target);
@@ -93,8 +94,10 @@ export function SftpPanel(props: {
         setEntries(listing.entries);
         setError(null);
         if (!keepSelection) setSelected(new Set());
+        return true;
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
+        return false;
       } finally {
         setLoading(false);
       }
@@ -115,10 +118,14 @@ export function SftpPanel(props: {
     [termId, load, showToast],
   );
 
-  // First load once the terminal connects: the shell's folder, or home.
+  // First load once the terminal connects: the host's start folder, else the
+  // shell's folder, else home. SFTP paths without a leading / are relative to
+  // home, so "~/x" becomes "x".
   useEffect(() => {
     if (!connected) return;
     void (async () => {
+      const start = host?.startDir?.trim();
+      if (start && !pathRef.current && (await load(start.replace(/^~\/?/, "")))) return;
       const cwd = prefs.follow ? await sftpApi.cwd(termId).catch(() => null) : null;
       await load(cwd ?? pathRef.current ?? "");
     })();
@@ -308,9 +315,23 @@ export function SftpPanel(props: {
         icon: <Copy size={13} />,
         onClick: () => void navigator.clipboard.writeText(names.map((n) => remoteJoin(path, n)).join("\n")),
       },
+      ...(isDirLike(entry) && names.length === 1
+        ? [{ label: "Use as start folder", icon: <Home size={13} />, onClick: () => void useAsStartFolder(remoteJoin(path, entry.name)) }]
+        : []),
       { label: "Delete…", icon: <Trash2 size={13} />, hint: "Del", danger: true, onClick: () => setConfirmDelete(names) },
     ];
     openMenu(e, items);
+  };
+
+  const useAsStartFolder = async (dir: string) => {
+    if (!host) return;
+    try {
+      await sshApi.save({ ...host, startDir: dir }, null);
+      await useApp.getState().loadConnections();
+      showToast(`${host.name} will now open in ${dir}`, "ok");
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), "error");
+    }
   };
 
   const backgroundMenu = (e: React.MouseEvent) => {
@@ -322,6 +343,7 @@ export function SftpPanel(props: {
       "separator",
       { label: "Refresh", icon: <RefreshCw size={13} />, onClick: () => void load(path, true) },
       { label: "Copy folder path", icon: <Copy size={13} />, onClick: () => void navigator.clipboard.writeText(path) },
+      { label: "Use this folder as start folder", icon: <Home size={13} />, onClick: () => void useAsStartFolder(path) },
     ]);
   };
 
