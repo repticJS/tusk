@@ -28,6 +28,7 @@ import { RemoteFileTab } from "./components/RemoteFileTab";
 import { TerminalTab } from "./components/TerminalTab";
 import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
 import { DiscoverTab } from "./components/DiscoverTab";
+import { ImportDialog, ShareDialog } from "./components/ShareDialogs";
 import { UpdateChip, UpdateDialog, useUpdateChecks } from "./components/Updater";
 import { Modal, useMenu } from "./components/ui";
 import { setPasswordPrompter, setSshPrompter } from "./lib/api";
@@ -181,6 +182,8 @@ export default function App() {
       {connectionDialog.open && <ConnectionDialog key={connectionDialog.editing?.id ?? "new"} />}
       {sshDialog.open && <SshDialog key={sshDialog.editing?.id ?? "new"} />}
       {tunnelDialog.open && <TunnelDialog key={tunnelDialog.editing?.id || "new"} />}
+      <ShareDialog />
+      <ImportDialog />
       <PasswordPrompt />
       <SshSecretPrompt />
       <HostKeyPrompt />

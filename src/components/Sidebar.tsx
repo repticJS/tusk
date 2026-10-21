@@ -20,6 +20,8 @@ import {
   Table2,
   TerminalSquare,
   Monitor,
+  Download,
+  Share2,
   Radar,
   Trash2,
   Waypoints,
@@ -141,6 +143,11 @@ export function Sidebar() {
             { label: "New SSH host", icon: <TerminalSquare size={13} />, onClick: () => openSshDialog() },
             "separator",
             { label: "New folder", icon: <FolderPlus size={13} />, onClick: () => void createFolder(null) },
+            {
+              label: "Import shared folder…",
+              icon: <Download size={13} />,
+              onClick: () => useApp.getState().openImportDialog(null),
+            },
           ]}
         />
       </div>
@@ -298,6 +305,13 @@ function FolderNode({ folder, depth, tree }: { folder: Folder; depth: number; tr
               label: "New PostgreSQL connection here",
               icon: <Database size={13} />,
               onClick: () => openConnectionDialog({ ...blankConnection(), folderId: folder.id }),
+            },
+            "separator",
+            { label: "Share folder…", icon: <Share2 size={13} />, onClick: () => useApp.getState().openShareDialog(folder.id) },
+            {
+              label: "Import into this folder…",
+              icon: <Download size={13} />,
+              onClick: () => useApp.getState().openImportDialog(folder.id),
             },
             "separator",
             { label: "Rename", icon: <Pencil size={13} />, hint: "F2", onClick: () => setRenamingFolder(folder.id) },

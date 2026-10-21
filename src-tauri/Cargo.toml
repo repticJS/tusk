@@ -31,6 +31,11 @@ russh = { version = "0.64", default-features = false, features = ["flate2", "rin
 dirs = "6"
 russh-sftp = "3"
 portable-pty = "0.9"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+flate2 = "1"
+rand = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

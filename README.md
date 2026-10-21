@@ -41,6 +41,12 @@ Open PowerShell, Command Prompt, Git Bash or any WSL distro in a tab from the mo
 
 **Multi-exec** (the antenna button in any terminal's header) sends what you type to several terminals at once, SSH and local alike. Tick which ones take part, and use **Tile** to see them side by side.
 
+### Sharing folders
+
+Right-click a folder → **Share folder…** to hand its connections, SSH hosts and tunnels (with subfolders, and any SSH hosts its connections go through) to a teammate as a share code or a `.tusk` file. They import it with **+** → **Import shared folder…** and get their own copy; nothing in their sidebar is overwritten.
+
+Passwords, SSH passwords and private key files are left out unless you tick **Include passwords and keys**. Then the share is encrypted with a passphrase you choose (Argon2id + XChaCha20-Poly1305); send the passphrase separately. Imported passwords go to Windows Credential Manager and key files to Tusk's own folder, readable only by you.
+
 ### Discover databases and containers
 
 The **Discover** tab (radar button at the top of the sidebar, or right-click an SSH host → *Scan for databases & containers*) scans this PC and your SSH servers. SSH servers are also scanned in the background when you open a terminal, and the terminal header shows what was found.
@@ -125,6 +131,7 @@ src-tauri/src/
   ssh.rs       SSH terminals: connect, host-key checks, auth, PTY shell streamed to the UI
   stats.rs     server performance stats over a terminal's connection (/proc, df)
   sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
+  share.rs     folder share codes: collecting, encryption, importing with new ids
   pm2.rs       PM2 apps: listing (pm2 jlist), actions, new apps, logs/monit terminals
   discover.rs  finds databases and Docker containers (ss/netstat/proc, ps, pg_lsclusters, docker)
   local.rs     local shells in a pseudo-terminal (ConPTY on Windows), shell detection

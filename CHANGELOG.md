@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0
+
+- Share folders: right-click a folder → Share folder… to send its connections, SSH hosts and tunnels as a share code or .tusk file. Import with + → Import shared folder….
+- Optionally include passwords, SSH passwords and private key files, encrypted with a passphrase.
+- Shares bring along SSH hosts their connections tunnel through, and imports never overwrite what you already have.
+
 ## 0.6.0
 
 - PM2 support: Discover now lists PM2 apps on your servers (and this PC) with live status, CPU, memory, uptime and restarts. Start, stop, restart, reload, delete, clear logs, reset counters, save the process list, bring back saved apps, and start new apps. Logs and Monitor open in a terminal tab.

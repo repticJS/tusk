@@ -3,6 +3,7 @@ mod discover;
 mod error;
 mod local;
 mod pm2;
+mod share;
 mod sftp;
 mod ssh;
 mod stats;
@@ -227,6 +228,89 @@ fn delete_folder(state: State<'_, AppState>, id: String) -> AppResult<()> {
 #[tauri::command]
 fn move_to_folder(state: State<'_, AppState>, items: Vec<ItemRef>, folder_id: Option<String>) -> AppResult<()> {
     state.store.lock().unwrap().move_items(&items, folder_id)
+}
+
+// ---- sharing folders ----
+
+impl AppState {
+    fn ssh_secret(&self, host_id: &str) -> Option<String> {
+        let stored = self.store.lock().unwrap().get_ssh_secret(host_id);
+        self.ssh.transient_secrets.lock().unwrap().get(host_id).cloned().or(stored)
+    }
+
+    /// The passwords, SSH secrets and key files Tusk has for a bundle's items.
+    fn share_secrets(&self, b: &share::Bundle) -> share::Secrets {
+        let mut s = share::Secrets::default();
+        for c in &b.connections {
+            if let Some(p) = self.password(&c.id) {
+                s.passwords.insert(c.id.clone(), p);
+            }
+        }
+        for h in &b.ssh_hosts {
+            if let Some(p) = self.ssh_secret(&h.id) {
+                s.ssh.insert(h.id.clone(), p);
+            }
+            if h.auth == "key" {
+                if let Some(k) = h.key_path.as_deref().and_then(share::read_key_file) {
+                    s.keys.insert(h.id.clone(), k);
+                }
+            }
+        }
+        s
+    }
+}
+
+/// What sharing a folder would include.
+#[tauri::command]
+fn share_info(state: State<'_, AppState>, folder_id: String) -> AppResult<share::ExportInfo> {
+    let (bundle, extra) = share::collect(&state.store.lock().unwrap(), &folder_id)?;
+    let secrets = state.share_secrets(&bundle);
+    Ok(share::ExportInfo {
+        name: bundle.folders[0].name.clone(),
+        counts: share::counts(&bundle),
+        extra_hosts: extra,
+        passwords: secrets.passwords.len(),
+        ssh_secrets: secrets.ssh.len(),
+        key_files: secrets.keys.len(),
+    })
+}
+
+/// A share code for a folder; with `include_secrets`, encrypted with `passphrase`.
+#[tauri::command]
+fn share_export(
+    state: State<'_, AppState>,
+    folder_id: String,
+    include_secrets: bool,
+    passphrase: Option<String>,
+) -> AppResult<String> {
+    let (mut bundle, _) = share::collect(&state.store.lock().unwrap(), &folder_id)?;
+    if include_secrets {
+        bundle.secrets = Some(state.share_secrets(&bundle));
+    }
+    let name = bundle.folders[0].name.clone();
+    share::encode(&name, &bundle, if include_secrets { passphrase.as_deref() } else { None })
+}
+
+#[tauri::command]
+fn share_preview(text: String) -> AppResult<share::Preview> {
+    share::preview(&text)
+}
+
+/// Imports a share into `parent_id` (None: top level).
+#[tauri::command]
+async fn share_import(
+    state: State<'_, AppState>,
+    text: String,
+    passphrase: Option<String>,
+    parent_id: Option<String>,
+) -> AppResult<share::ImportResult> {
+    // Key derivation takes a moment; keep it off the async runtime.
+    let bundle = tokio::task::spawn_blocking(move || share::decode(&text, passphrase.as_deref()))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))??;
+    let mut store = state.store.lock().unwrap();
+    let keys = store.keys_dir();
+    share::import(&mut store, bundle, parent_id, &keys)
 }
 
 // ---- SSH ----
@@ -674,6 +758,10 @@ pub fn run() {
             save_folder,
             delete_folder,
             move_to_folder,
+            share_info,
+            share_export,
+            share_preview,
+            share_import,
             list_ssh_hosts,
             save_ssh_host,
             delete_ssh_host,

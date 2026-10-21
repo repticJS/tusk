@@ -35,6 +35,41 @@ export const folderApi = {
     call<void>("move_to_folder", { items, folderId }),
 };
 
+// ---- sharing folders ----
+
+export interface ShareCounts {
+  folders: number;
+  connections: number;
+  sshHosts: number;
+  tunnels: number;
+}
+
+export interface ShareInfo {
+  name: string;
+  counts: ShareCounts;
+  /** SSH hosts from outside the folder that its connections go through. */
+  extraHosts: string[];
+  passwords: number;
+  sshSecrets: number;
+  keyFiles: number;
+}
+
+export interface SharePreview {
+  name: string;
+  counts: ShareCounts;
+  /** Has passwords/keys; needs the passphrase. */
+  encrypted: boolean;
+}
+
+export const shareApi = {
+  info: (folderId: string) => call<ShareInfo>("share_info", { folderId }),
+  export: (folderId: string, includeSecrets: boolean, passphrase: string | null) =>
+    call<string>("share_export", { folderId, includeSecrets, passphrase }),
+  preview: (text: string) => call<SharePreview>("share_preview", { text }),
+  import: (text: string, passphrase: string | null, parentId: string | null) =>
+    call<{ folderId: string; name: string; counts: ShareCounts }>("share_import", { text, passphrase, parentId }),
+};
+
 export interface SessionRef {
   connId: string;
   database: string;

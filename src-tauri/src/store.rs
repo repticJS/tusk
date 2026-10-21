@@ -320,6 +320,11 @@ impl Store {
         self.save()
     }
 
+    /// Where private keys from imported shares are kept.
+    pub fn keys_dir(&self) -> PathBuf {
+        self.dir.join("keys")
+    }
+
     pub fn known_hosts_path(&self) -> std::path::PathBuf {
         self.dir.join("known_hosts")
     }

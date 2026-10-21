@@ -204,6 +204,10 @@ interface State {
   connectionDialog: { open: boolean; editing?: ConnectionConfig; password?: string };
   sshDialog: { open: boolean; editing?: SshHost };
   tunnelDialog: { open: boolean; editing?: Partial<TunnelConfig> };
+  /** Folder being shared. */
+  shareFolderId: string | null;
+  /** Import dialog: open, and the folder to import into (null: top level). */
+  importDialog: { parentId: string | null } | null;
   passwordRequest: PasswordRequest | null;
   sshSecretRequest: SshSecretRequest | null;
   hostKeyRequest: HostKeyRequest | null;
@@ -245,6 +249,9 @@ interface State {
   startAutoTunnels(): Promise<void>;
   openTunnelDialog(editing?: Partial<TunnelConfig>): void;
   closeTunnelDialog(): void;
+  openShareDialog(folderId: string | null): void;
+  openImportDialog(parentId?: string | null): void;
+  closeImportDialog(): void;
   openTunnelsTab(): void;
   loadShells(): Promise<void>;
   /** Opens a local terminal; the first detected shell when none is given. */
@@ -339,6 +346,8 @@ export const useApp = create<State>()(
       connectionDialog: { open: false },
       sshDialog: { open: false },
       tunnelDialog: { open: false },
+      shareFolderId: null,
+      importDialog: null,
       passwordRequest: null,
       sshSecretRequest: null,
       hostKeyRequest: null,
@@ -593,6 +602,9 @@ export const useApp = create<State>()(
 
       openTunnelDialog: (editing) => set({ tunnelDialog: { open: true, editing } }),
       closeTunnelDialog: () => set({ tunnelDialog: { open: false } }),
+      openShareDialog: (shareFolderId) => set({ shareFolderId }),
+      openImportDialog: (parentId = null) => set({ importDialog: { parentId } }),
+      closeImportDialog: () => set({ importDialog: null }),
 
       openTunnelsTab() {
         const existing = get().tabs.find((t) => t.kind === "tunnels");

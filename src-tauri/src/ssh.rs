@@ -328,7 +328,7 @@ async fn auth_agent(h: &mut Handle<Client>, user: &str) -> AppResult<bool> {
     auth_with_agent(h, user, agent).await
 }
 
-fn expand_home(path: &str) -> PathBuf {
+pub fn expand_home(path: &str) -> PathBuf {
     match path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
         Some(rest) => dirs::home_dir().map(|h| h.join(rest)).unwrap_or_else(|| PathBuf::from(path)),
         None => PathBuf::from(path),
