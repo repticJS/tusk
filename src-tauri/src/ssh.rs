@@ -406,6 +406,8 @@ pub struct OpenRequest {
     pub cols: u32,
     pub rows: u32,
     pub known_hosts: PathBuf,
+    /// Run this instead of the login shell (e.g. `docker logs -f web`).
+    pub command: Option<String>,
 }
 
 pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<InvokeResponseBody>) -> AppResult<()> {
@@ -418,11 +420,15 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
         .request_pty(false, "xterm-256color", req.cols.max(1), req.rows.max(1), 0, 0, &[])
         .await
         .map_err(ssh_err)?;
-    match cfg.start_dir.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+    if let Some(cmd) = req.command.as_deref().filter(|c| !c.trim().is_empty()) {
+        channel.exec(false, cmd).await.map_err(ssh_err)?;
+    } else {
+        match cfg.start_dir.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
         // Start the login shell inside the folder rather than typing a `cd`
         // into it, so nothing shows on screen or in the shell history.
-        Some(dir) => channel.exec(false, start_in_dir_command(dir)).await.map_err(ssh_err)?,
-        None => channel.request_shell(false).await.map_err(ssh_err)?,
+            Some(dir) => channel.exec(false, start_in_dir_command(dir)).await.map_err(ssh_err)?,
+            None => channel.request_shell(false).await.map_err(ssh_err)?,
+        }
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Cmd>();

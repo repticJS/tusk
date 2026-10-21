@@ -22,7 +22,7 @@ function parseUrl(url: string): Partial<ConnectionConfig> & { password?: string 
 }
 
 export function ConnectionDialog() {
-  const { editing } = useApp((s) => s.connectionDialog);
+  const { editing, password: initialPassword } = useApp((s) => s.connectionDialog);
   const close = useApp((s) => s.closeConnectionDialog);
   const loadConnections = useApp((s) => s.loadConnections);
   const connect = useApp((s) => s.connect);
@@ -30,8 +30,8 @@ export function ConnectionDialog() {
   const sshHosts = useApp((s) => s.sshHosts);
 
   const [cfg, setCfg] = useState<ConnectionConfig>(() => (editing ? { ...editing } : blankConnection()));
-  const [password, setPassword] = useState("");
-  const [passwordTouched, setPasswordTouched] = useState(false);
+  const [password, setPassword] = useState(initialPassword ?? "");
+  const [passwordTouched, setPasswordTouched] = useState(!!initialPassword);
   const [url, setUrl] = useState("");
   const [test, setTest] = useState<{ state: "idle" | "running" | "ok" | "error"; text?: string }>({ state: "idle" });
   const [saving, setSaving] = useState(false);

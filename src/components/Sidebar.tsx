@@ -20,6 +20,7 @@ import {
   Table2,
   TerminalSquare,
   Monitor,
+  Radar,
   Trash2,
   Waypoints,
   X,
@@ -121,6 +122,13 @@ export function Sidebar() {
               : [{ label: "No shells found", disabled: true, onClick: () => {} }]
           }
         />
+        <button
+          className="btn-ghost h-7 px-1.5"
+          title="Discover databases and containers"
+          onClick={() => useApp.getState().openDiscoverTab()}
+        >
+          <Radar size={15} />
+        </button>
         <button className="btn-ghost h-7 px-1.5" title="SSH tunnels" onClick={() => useApp.getState().openTunnelsTab()}>
           <Waypoints size={15} />
         </button>
@@ -478,6 +486,11 @@ function SshNode({
         onContextMenu={(e) =>
           openMenu(e, [
             { label: "Open terminal", icon: <TerminalSquare size={13} />, onClick: () => openTerminalTab(host.id) },
+            {
+              label: "Scan for databases & containers",
+              icon: <Radar size={13} />,
+              onClick: () => useApp.getState().openDiscoverTab(host.id),
+            },
             {
               label: "New tunnel…",
               icon: <Waypoints size={13} />,

@@ -41,6 +41,13 @@ Open PowerShell, Command Prompt, Git Bash or any WSL distro in a tab from the mo
 
 **Multi-exec** (the antenna button in any terminal's header) sends what you type to several terminals at once, SSH and local alike. Tick which ones take part, and use **Tile** to see them side by side.
 
+### Discover databases and containers
+
+The **Discover** tab (radar button at the top of the sidebar, or right-click an SSH host → *Scan for databases & containers*) scans this PC and your SSH servers. SSH servers are also scanned in the background when you open a terminal, and the terminal header shows what was found.
+
+- **Databases:** listening PostgreSQL, MySQL/MariaDB, Redis, MongoDB, SQL Server and more, with PostgreSQL versions and data folders. **Add connection** fills in a PostgreSQL connection, through the SSH host when needed. Other databases can be forwarded to this PC with one click.
+- **Docker / Podman containers:** state, image and ports, with start, stop, restart, live logs and a shell inside the container. Database containers get **Add connection** too, filled in from their environment (`POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_PASSWORD`).
+
 ### SSH tunnels
 
 Open the **Tunnels** tab from the sidebar's tunnel button, the status bar, or the command palette.
@@ -114,6 +121,7 @@ src-tauri/src/
   ssh.rs       SSH terminals: connect, host-key checks, auth, PTY shell streamed to the UI
   stats.rs     server performance stats over a terminal's connection (/proc, df)
   sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
+  discover.rs  finds databases and Docker containers (ss/netstat/proc, ps, pg_lsclusters, docker)
   local.rs     local shells in a pseudo-terminal (ConPTY on Windows), shell detection
   tunnel.rs    SSH port forwarding (local, remote, SOCKS), shared per-host connections, DB tunnels
   store.rs     saved connections (JSON in %APPDATA%\dev.tusk.app) + Credential Manager passwords

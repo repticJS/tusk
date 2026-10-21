@@ -7,10 +7,14 @@ import {
   sshApi,
   tunnelApi,
   withSshPrompts,
+  discoverApi,
   type AppErrorInfo,
+  type ContainerAction,
+  type ContainerInfo,
   type ConnectionConfig,
   type Folder,
   type ItemKind,
+  type ScanResult,
   type SessionRef,
   type Shell,
   type SshHost,
@@ -45,6 +49,8 @@ export interface TerminalTab {
   kind: "terminal";
   title: string;
   hostId: string;
+  /** Run this instead of the login shell (container logs, a shell inside a container). */
+  command?: string;
 }
 
 /** A shell on this PC (PowerShell, cmd, WSL…). */
@@ -53,6 +59,28 @@ export interface LocalTab {
   kind: "local";
   title: string;
   shellId: string;
+  /** Program and arguments to run instead of the shell. */
+  command?: string[];
+}
+
+/** Databases and containers found on this PC and the SSH hosts. */
+export interface DiscoverTab {
+  id: string;
+  kind: "discover";
+  title: string;
+}
+
+/** A scan of "local" (this PC) or an SSH host id. */
+export interface ScanState {
+  state: "scanning" | "done" | "error";
+  result?: ScanResult;
+  error?: string;
+  at?: number;
+}
+
+export interface TerminalOptions {
+  command?: string;
+  title?: string;
 }
 
 /** A remote file opened for editing over a terminal's SFTP connection. */
@@ -74,7 +102,7 @@ export interface TunnelsTab {
 
 /** Tabs bound to a database connection. */
 export type DbTab = QueryTab | TableTab;
-export type Tab = DbTab | TerminalTab | LocalTab | RemoteFileTab | TunnelsTab;
+export type Tab = DbTab | TerminalTab | LocalTab | RemoteFileTab | TunnelsTab | DiscoverTab;
 
 /** Tabs with a terminal in them. */
 export const isTermTab = (t: Tab | undefined): t is TerminalTab | LocalTab =>
@@ -166,8 +194,12 @@ interface State {
   tunnelErrors: Record<string, string | undefined>;
   shells: Shell[];
   multiExec: MultiExec;
+  scans: Record<string, ScanState | undefined>;
+  /** Target to bring into view when the Discover tab opens. */
+  discoverFocus: string | null;
 
-  connectionDialog: { open: boolean; editing?: ConnectionConfig };
+  /** `password` prefills the password field (from a scanned container). */
+  connectionDialog: { open: boolean; editing?: ConnectionConfig; password?: string };
   sshDialog: { open: boolean; editing?: SshHost };
   tunnelDialog: { open: boolean; editing?: Partial<TunnelConfig> };
   passwordRequest: PasswordRequest | null;
@@ -180,12 +212,12 @@ interface State {
   setTheme(t: "dark" | "light"): void;
   setRowLimit(n: number): void;
   loadConnections(): Promise<void>;
-  openConnectionDialog(editing?: ConnectionConfig): void;
+  openConnectionDialog(editing?: ConnectionConfig, password?: string): void;
   closeConnectionDialog(): void;
   openSshDialog(editing?: SshHost): void;
   closeSshDialog(): void;
   deleteSshHost(id: string): Promise<void>;
-  openTerminalTab(hostId: string): void;
+  openTerminalTab(hostId: string, opts?: TerminalOptions): void;
   openRemoteFile(termId: string, hostId: string, path: string): void;
   setFilePanel(patch: Partial<FilePanelPrefs>): void;
   setStatsBar(on: boolean): void;
@@ -214,7 +246,12 @@ interface State {
   openTunnelsTab(): void;
   loadShells(): Promise<void>;
   /** Opens a local terminal; the first detected shell when none is given. */
-  openLocalTerminal(shellId?: string): void;
+  openLocalTerminal(shellId?: string, opts?: { command?: string[]; title?: string }): void;
+  /** Scans "local" or an SSH host id; `viaTerminal` reuses that terminal's connection. */
+  scan(target: string, viaTerminal?: string): Promise<void>;
+  scanAll(): Promise<void>;
+  containerAction(target: string, c: ContainerInfo, action: ContainerAction): Promise<void>;
+  openDiscoverTab(focus?: string): void;
   setMultiExec(patch: Partial<MultiExec>): void;
   /** Turns multi-exec on (for every open terminal) or off. */
   toggleMultiExec(): void;
@@ -289,6 +326,8 @@ export const useApp = create<State>()(
       tunnelErrors: {},
       shells: [],
       multiExec: { on: false, targets: [], tiled: false },
+      scans: {},
+      discoverFocus: null,
       connectionDialog: { open: false },
       sshDialog: { open: false },
       tunnelDialog: { open: false },
@@ -318,6 +357,7 @@ export const useApp = create<State>()(
         const tabs = get().tabs.filter(
           (t) =>
             t.kind === "tunnels" ||
+            t.kind === "discover" ||
             t.kind === "local" ||
             ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId),
         );
@@ -327,7 +367,7 @@ export const useApp = create<State>()(
         set({ connections, sshHosts, folders, tunnels, tabs, activeTabId });
       },
 
-      openConnectionDialog: (editing) => set({ connectionDialog: { open: true, editing } }),
+      openConnectionDialog: (editing, password) => set({ connectionDialog: { open: true, editing, password } }),
       closeConnectionDialog: () => set({ connectionDialog: { open: false } }),
       openSshDialog: (editing) => set({ sshDialog: { open: true, editing } }),
       closeSshDialog: () => set({ sshDialog: { open: false } }),
@@ -350,12 +390,13 @@ export const useApp = create<State>()(
         await get().refreshTunnelStatus();
       },
 
-      openTerminalTab(hostId) {
+      openTerminalTab(hostId, opts) {
         const host = get().sshHosts.find((h) => h.id === hostId);
         if (!host) return;
-        const same = get().tabs.filter((t) => t.kind === "terminal" && t.hostId === hostId).length;
+        const same = get().tabs.filter((t) => t.kind === "terminal" && t.hostId === hostId && !t.command).length;
         const id = uid();
-        const tab: TerminalTab = { id, kind: "terminal", hostId, title: same ? `${host.name} (${same + 1})` : host.name };
+        const title = opts?.title ?? (same ? `${host.name} (${same + 1})` : host.name);
+        const tab: TerminalTab = { id, kind: "terminal", hostId, title, command: opts?.command };
         set((s) => ({
           tabs: [...s.tabs, tab],
           activeTabId: id,
@@ -560,17 +601,64 @@ export const useApp = create<State>()(
         }
       },
 
-      openLocalTerminal(shellId) {
-        const shell = get().shells.find((x) => x.id === shellId) ?? get().shells[0];
-        if (!shell) return get().showToast("No shells found on this PC", "error");
-        const same = get().tabs.filter((t) => t.kind === "local" && t.shellId === shell.id).length;
-        const tab: LocalTab = { id: uid(), kind: "local", shellId: shell.id, title: same ? `${shell.name} (${same + 1})` : shell.name };
+      openLocalTerminal(shellId, opts) {
+        let tab: LocalTab;
+        if (opts?.command?.length) {
+          tab = { id: uid(), kind: "local", shellId: "", title: opts.title ?? opts.command[0], command: opts.command };
+        } else {
+          const shell = get().shells.find((x) => x.id === shellId) ?? get().shells[0];
+          if (!shell) return get().showToast("No shells found on this PC", "error");
+          const same = get().tabs.filter((t) => t.kind === "local" && t.shellId === shell.id).length;
+          tab = { id: uid(), kind: "local", shellId: shell.id, title: same ? `${shell.name} (${same + 1})` : shell.name };
+        }
         set((s) => ({
           tabs: [...s.tabs, tab],
           activeTabId: tab.id,
           // A terminal opened during multi-exec joins in.
           multiExec: s.multiExec.on ? { ...s.multiExec, targets: [...s.multiExec.targets, tab.id] } : s.multiExec,
         }));
+      },
+
+      async scan(target, viaTerminal) {
+        if (get().scans[target]?.state === "scanning") return;
+        set((s) => ({ scans: { ...s.scans, [target]: { ...s.scans[target], state: "scanning" } } }));
+        try {
+          const result =
+            target === "local"
+              ? await discoverApi.local()
+              : viaTerminal
+                ? await discoverApi.terminal(viaTerminal)
+                : await discoverApi.host(target);
+          set((s) => ({ scans: { ...s.scans, [target]: { state: "done", result, at: Date.now() } } }));
+        } catch (e) {
+          const error = e instanceof Error ? e.message : String(e);
+          set((s) => ({ scans: { ...s.scans, [target]: { ...s.scans[target], state: "error", error, at: Date.now() } } }));
+        }
+      },
+
+      async scanAll() {
+        // One at a time, so login prompts don't pile up.
+        await get().scan("local");
+        for (const h of get().sshHosts) await get().scan(h.id);
+      },
+
+      async containerAction(target, c, action) {
+        const docker = get().scans[target]?.result?.docker;
+        try {
+          await discoverApi.docker(target === "local" ? null : target, docker?.command || "docker", action, c.id);
+          get().showToast(`${c.name}: ${action === "stop" ? "stopped" : action === "start" ? "started" : "restarted"}`, "ok");
+        } catch (e) {
+          get().showToast(`${c.name}: ${e instanceof Error ? e.message : String(e)}`, "error");
+        }
+        await get().scan(target);
+      },
+
+      openDiscoverTab(focus) {
+        set({ discoverFocus: focus ?? null });
+        const existing = get().tabs.find((t) => t.kind === "discover");
+        if (existing) return set({ activeTabId: existing.id });
+        const tab: DiscoverTab = { id: uid(), kind: "discover", title: "Discover" };
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
       },
 
       setMultiExec: (patch) => set((s) => ({ multiExec: { ...s.multiExec, ...patch } })),

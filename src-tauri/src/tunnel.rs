@@ -61,6 +61,8 @@ struct Link {
     creds: StdMutex<Creds>,
     conn: tokio::sync::Mutex<Option<Arc<Handle<Client>>>>,
     forwards: RemoteForwards,
+    /// Commands running on the link (see `Tunnels::exec`); keeps it open.
+    busy: AtomicU64,
 }
 
 impl Link {
@@ -158,11 +160,25 @@ impl Tunnels {
     }
 
     async fn link(&self, creds: Creds) -> Arc<Link> {
+        self.link_marked(creds, false).await
+    }
+
+    /// The host's link; `busy` marks it in use before the map lock is
+    /// released, so `release_link` can't close it in between.
+    async fn link_marked(&self, creds: Creds, busy: bool) -> Arc<Link> {
         let mut links = self.links.lock().await;
         let link = links.entry(creds.config.id.clone()).or_insert_with(|| {
-            Arc::new(Link { creds: StdMutex::new(creds.clone()), conn: Default::default(), forwards: Default::default() })
+            Arc::new(Link {
+                creds: StdMutex::new(creds.clone()),
+                conn: Default::default(),
+                forwards: Default::default(),
+                busy: AtomicU64::new(0),
+            })
         });
         *link.creds.lock().unwrap() = creds;
+        if busy {
+            link.busy.fetch_add(1, Ordering::SeqCst);
+        }
         link.clone()
     }
 
@@ -253,14 +269,37 @@ impl Tunnels {
         self.release_link(&r.host_id).await;
     }
 
-    /// Closes a host's link once no tunnel uses it.
+    /// Closes a host's link once no tunnel or command uses it.
     async fn release_link(&self, host_id: &str) {
         if self.running.lock().await.values().any(|r| r.host_id == host_id) {
             return;
         }
-        if let Some(link) = self.links.lock().await.remove(host_id) {
+        let link = {
+            let mut links = self.links.lock().await;
+            match links.get(host_id) {
+                Some(l) if l.busy.load(Ordering::SeqCst) == 0 => links.remove(host_id),
+                _ => None,
+            }
+        };
+        if let Some(link) = link {
             link.close().await;
         }
+    }
+
+    /// Runs a command on a host over its shared link (connecting if needed),
+    /// for scans and quick actions that don't belong to a terminal.
+    pub async fn exec(&self, creds: Creds, cmd: &str, timeout: Duration) -> AppResult<(String, Option<u32>)> {
+        let host_id = creds.config.id.clone();
+        let link = self.link_marked(creds, true).await;
+        let accept = self.accepted.lock().unwrap().remove(&host_id);
+        let result = async {
+            let handle = link.handle(accept).await?;
+            crate::sftp::exec_on(&handle, cmd, timeout).await
+        }
+        .await;
+        link.busy.fetch_sub(1, Ordering::SeqCst);
+        self.release_link(&host_id).await;
+        result
     }
 
     /// The local port of a database connection's private tunnel, starting it

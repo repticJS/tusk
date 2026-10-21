@@ -7,9 +7,10 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { Activity, ChevronDown, ChevronUp, FolderTree, Radio, RotateCw, Search, X } from "lucide-react";
+import { Activity, ChevronDown, ChevronUp, FolderTree, Radar, Radio, RotateCw, Search, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
+import { useShallow } from "zustand/react/shallow";
 import { DbError, localApi, sshApi } from "../lib/api";
 import { broadcast, registerTerminal } from "../lib/multiexec";
 import { useApp, type LocalTab, type TerminalTab as TerminalTabT } from "../store";
@@ -79,6 +80,15 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
   const shell = useApp((s) => (tab.kind === "local" ? s.shells.find((x) => x.id === tab.shellId) : undefined));
   const inMultiExec = useApp((s) => s.multiExec.on && s.multiExec.targets.includes(tab.id));
   const multiExecOn = useApp((s) => s.multiExec.on);
+  // What the background scan of this host found (-1: not scanned).
+  const found = useApp(
+    useShallow((s) => {
+      const r = tab.kind === "terminal" ? s.scans[tab.hostId]?.result : undefined;
+      return r
+        ? { dbs: r.databases.length + r.docker.containers.filter((c) => c.dbKind).length, containers: r.docker.containers.length }
+        : { dbs: -1, containers: -1 };
+    }),
+  );
   const theme = useApp((s) => s.theme);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -124,6 +134,7 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
             );
           }
         },
+        tab.command,
       );
     } catch (err) {
       setState("closed");
@@ -152,14 +163,19 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
           (e) => {
             if (e.type === "connected") {
               setState("connected");
+              // Look for databases and containers in the background, once in a while.
+              const scan = useApp.getState().scans[h.id];
+              const fresh = scan && (scan.state === "scanning" || Date.now() - (scan.at ?? 0) < 5 * 60_000);
+              if (!tab.command && !fresh) void useApp.getState().scan(h.id, tab.id);
               if (e.banner) term.write(e.banner.replace(/\r?\n/g, "\r\n"));
             } else if (e.type === "closed") {
               setState("closed");
               term.write(
-                `\r\n${ANSI_DIM}── Disconnected${e.reason ? `: ${e.reason}` : ""}. Press Enter or R to reconnect ──${ANSI_RESET}\r\n`,
+                `\r\n${ANSI_DIM}── ${tab.command ? "Ended" : "Disconnected"}${e.reason ? `: ${e.reason}` : ""}. Press Enter or R to ${tab.command ? "run it again" : "reconnect"} ──${ANSI_RESET}\r\n`,
               );
             }
           },
+          tab.command,
         );
       } catch (err) {
         const info = err instanceof DbError ? err.info : { message: String(err), kind: null, hint: null, detail: null };
@@ -382,6 +398,18 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
         <span className="truncate text-faint">{target}</span>
         {state === "connecting" && <Spinner size={11} />}
         <div className="flex-1" />
+        {(found.dbs > 0 || found.containers > 0) && (
+          <button
+            className="flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-px text-[11px] text-muted hover:text-text"
+            title="Databases and containers on this server"
+            onClick={() => tab.kind === "terminal" && useApp.getState().openDiscoverTab(tab.hostId)}
+          >
+            <Radar size={11} className="text-accent" />
+            {found.dbs > 0 && `${found.dbs} database${found.dbs === 1 ? "" : "s"}`}
+            {found.dbs > 0 && found.containers > 0 && " · "}
+            {found.containers > 0 && `${found.containers} container${found.containers === 1 ? "" : "s"}`}
+          </button>
+        )}
         {inMultiExec && (
           <span className="flex shrink-0 items-center gap-1 rounded bg-warn-soft px-1.5 py-px text-[11px] font-medium text-warn">
             <Radio size={11} /> Multi-exec

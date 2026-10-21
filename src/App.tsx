@@ -5,6 +5,7 @@ import {
   Monitor,
   Moon,
   Plus,
+  Radar,
   Radio,
   Search,
   SquareTerminal,
@@ -26,6 +27,7 @@ import { TableTab } from "./components/TableTab";
 import { RemoteFileTab } from "./components/RemoteFileTab";
 import { TerminalTab } from "./components/TerminalTab";
 import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
+import { DiscoverTab } from "./components/DiscoverTab";
 import { UpdateChip, UpdateDialog, useUpdateChecks } from "./components/Updater";
 import { Modal, useMenu } from "./components/ui";
 import { setPasswordPrompter, setSshPrompter } from "./lib/api";
@@ -162,6 +164,8 @@ export default function App() {
                     <TerminalTab tab={t} active={t.id === activeTabId} tiled={tiled} />
                   ) : t.kind === "tunnels" ? (
                     <TunnelsTab tab={t} active={t.id === activeTabId} />
+                  ) : t.kind === "discover" ? (
+                    <DiscoverTab tab={t} active={t.id === activeTabId} />
                   ) : (
                     <RemoteFileTab tab={t} active={t.id === activeTabId} />
                   )}
@@ -208,7 +212,7 @@ function TabBar() {
       <div className="flex min-w-0 flex-1 items-end overflow-x-auto [scrollbar-width:none]">
         {tabs.map((t) => {
           const conn =
-            t.kind === "tunnels" || t.kind === "local"
+            t.kind === "tunnels" || t.kind === "local" || t.kind === "discover"
               ? undefined
               : t.kind === "terminal" || t.kind === "remote"
                 ? sshHosts.find((h) => h.id === t.hostId)
@@ -237,6 +241,8 @@ function TabBar() {
               title={
                 t.kind === "tunnels"
                   ? "SSH tunnels"
+                  : t.kind === "discover"
+                    ? "Databases and containers"
                   : t.kind === "local"
                     ? `Local terminal: ${t.title}`
                   : t.kind === "terminal"
@@ -262,6 +268,8 @@ function TabBar() {
                   <Waypoints size={13} />
                 ) : t.kind === "local" ? (
                   <Monitor size={13} />
+                ) : t.kind === "discover" ? (
+                  <Radar size={13} />
                 ) : (
                   <FileCode2 size={13} />
                 )}

@@ -1,4 +1,5 @@
 mod db;
+mod discover;
 mod error;
 mod local;
 mod sftp;
@@ -351,6 +352,7 @@ async fn ssh_open(
     cols: u32,
     rows: u32,
     accept_fingerprint: Option<String>,
+    command: Option<String>,
     events: Channel<InvokeResponseBody>,
 ) -> AppResult<()> {
     let (config, stored, known_hosts) = {
@@ -358,7 +360,7 @@ async fn ssh_open(
         (store.get_ssh(&host_id)?, store.get_ssh_secret(&host_id), store.known_hosts_path())
     };
     let secret = state.ssh.transient_secrets.lock().unwrap().get(&host_id).cloned().or(stored);
-    let req = ssh::OpenRequest { term_id, config, secret, accept_fingerprint, cols, rows, known_hosts };
+    let req = ssh::OpenRequest { term_id, config, secret, accept_fingerprint, cols, rows, known_hosts, command };
     ssh::open(&state.ssh, req, events).await
 }
 
@@ -394,14 +396,25 @@ async fn local_open(
     shell_id: String,
     cols: u16,
     rows: u16,
+    command: Option<Vec<String>>,
     events: Channel<InvokeResponseBody>,
 ) -> AppResult<()> {
-    let shell = state
-        .shells()
-        .await
-        .into_iter()
-        .find(|s| s.id == shell_id)
-        .ok_or_else(|| AppError::msg("That shell isn't available on this PC"))?;
+    let shell = match command.as_deref() {
+        // A program to run directly, e.g. ["docker", "logs", "-f", "web"].
+        Some([program, args @ ..]) => local::Shell {
+            id: "command".into(),
+            name: program.clone(),
+            program: program.clone(),
+            args: args.to_vec(),
+            kind: "other".into(),
+        },
+        _ => state
+            .shells()
+            .await
+            .into_iter()
+            .find(|s| s.id == shell_id)
+            .ok_or_else(|| AppError::msg("That shell isn't available on this PC"))?,
+    };
     state.local.open(&term_id, &shell, cols, rows, events)
 }
 
@@ -485,6 +498,52 @@ async fn sftp_upload(
 ) -> AppResult<()> {
     let conn = state.ssh.connection(&term_id).await?;
     sftp::upload(&conn, &state.transfers, &transfer_id, &local, &remote_dir, events).await
+}
+
+// ---- discovery ----
+
+const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Databases and containers on this PC.
+#[tauri::command]
+async fn discover_local() -> AppResult<discover::ScanResult> {
+    discover::scan_local().await
+}
+
+/// Databases and containers on a saved SSH host (its own connection).
+#[tauri::command]
+async fn discover_host(state: State<'_, AppState>, host_id: String) -> AppResult<discover::ScanResult> {
+    let creds = state.ssh_creds(&host_id)?;
+    let (out, _) = state.tunnels.exec(creds, discover::SCAN_SCRIPT, SCAN_TIMEOUT).await?;
+    Ok(discover::parse_scan(&out))
+}
+
+/// Same as discover_host, over an open terminal's connection.
+#[tauri::command]
+async fn discover_terminal(state: State<'_, AppState>, term_id: String) -> AppResult<discover::ScanResult> {
+    let conn = state.ssh.connection(&term_id).await?;
+    let (out, _) = sftp::exec_on(&conn.handle, discover::SCAN_SCRIPT, SCAN_TIMEOUT).await?;
+    Ok(discover::parse_scan(&out))
+}
+
+/// start / stop / restart a container on this PC (host_id None) or a host.
+#[tauri::command]
+async fn docker_action(
+    state: State<'_, AppState>,
+    host_id: Option<String>,
+    command: String,
+    action: String,
+    id: String,
+) -> AppResult<()> {
+    let Some(host_id) = host_id else {
+        return discover::docker_local(&command, &action, &id).await;
+    };
+    let cmd = discover::docker_command(&command, &action, &id)?;
+    let creds = state.ssh_creds(&host_id)?;
+    match state.tunnels.exec(creds, &cmd, SCAN_TIMEOUT).await? {
+        (_, Some(0)) => Ok(()),
+        (out, _) => Err(AppError::msg(out.trim().to_string())),
+    }
 }
 
 /// CPU, memory, disk and network counters of a terminal's server.
@@ -585,6 +644,10 @@ pub fn run() {
             sftp_upload,
             sftp_cancel,
             ssh_stats,
+            discover_local,
+            discover_host,
+            discover_terminal,
+            docker_action,
             ssh_processes,
         ])
         .run(tauri::generate_context!())

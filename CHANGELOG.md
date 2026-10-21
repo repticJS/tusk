@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Discover: scan this PC and your SSH servers for databases (PostgreSQL, MySQL, MariaDB, Redis, MongoDB, SQL Server and more) and Docker or Podman containers. Open it from the radar button at the top of the sidebar.
+- SSH servers are scanned in the background when you open a terminal; the terminal header shows what was found.
+- Add a found PostgreSQL server or container as a connection in one click, with the details filled in (through the SSH host when needed). Forward other databases to this PC.
+- Start, stop and restart containers, follow their logs, or open a shell inside them.
+
 ## 0.4.1
 
 - Server stats for SSH terminals: a live strip under the terminal shows CPU, memory, disk, network, load, uptime and logged-in users. Click it for graphs, all disks and the top processes. Works with Linux servers, and uses the terminal's own connection (no extra login).

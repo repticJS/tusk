@@ -218,6 +218,8 @@ export const sshApi = {
     acceptFingerprint: string | null,
     onData: (bytes: Uint8Array) => void,
     onEvent: (e: TermEvent) => void,
+    /** Run this instead of the login shell. */
+    command?: string,
   ) {
     const events = new Channel<ArrayBuffer | TermEvent>();
     events.onmessage = (m) => {
@@ -226,7 +228,7 @@ export const sshApi = {
       else if (Array.isArray(m)) onData(new Uint8Array(m as number[]));
       else onEvent(m);
     };
-    return call<void>("ssh_open", { termId, hostId, cols, rows, acceptFingerprint, events });
+    return call<void>("ssh_open", { termId, hostId, cols, rows, acceptFingerprint, command: command ?? null, events });
   },
   write: (termId: string, data: string) => call<void>("ssh_write", { termId, data }),
   resize: (termId: string, cols: number, rows: number) => call<void>("ssh_resize", { termId, cols, rows }),
@@ -275,6 +277,64 @@ export const statsApi = {
   processes: (termId: string) => call<{ cpuTotal: number; list: ServerProcess[] }>("ssh_processes", { termId }),
 };
 
+// ---- discovery ----
+
+export interface FoundDb {
+  kind: string;
+  port: number;
+  /** "" when listening on every interface. */
+  address: string;
+  process?: string | null;
+  version?: string | null;
+  detail?: string | null;
+}
+
+export interface PortMap {
+  hostIp: string;
+  hostPort: number;
+  containerPort: number;
+  proto: string;
+}
+
+export interface ContainerInfo {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  ports: PortMap[];
+  dbKind?: string | null;
+  dbPort?: number | null;
+  ip?: string | null;
+  env: { user?: string | null; database?: string | null; password?: string | null };
+}
+
+export interface DockerInfo {
+  status: "ok" | "missing" | "denied" | "stopped" | "error";
+  message?: string | null;
+  /** "docker", "sudo -n docker" or "podman". */
+  command: string;
+  version?: string | null;
+  containers: ContainerInfo[];
+}
+
+export interface ScanResult {
+  os: string;
+  databases: FoundDb[];
+  docker: DockerInfo;
+}
+
+export type ContainerAction = "start" | "stop" | "restart";
+
+export const discoverApi = {
+  local: () => call<ScanResult>("discover_local"),
+  host: (hostId: string) => withSshPrompts(() => call<ScanResult>("discover_host", { hostId })),
+  terminal: (termId: string) => call<ScanResult>("discover_terminal", { termId }),
+  /** hostId null means this PC. */
+  docker: (hostId: string | null, command: string, action: ContainerAction, id: string) =>
+    withSshPrompts(() => call<void>("docker_action", { hostId, command, action, id })),
+};
+
 // ---- local terminals ----
 
 export interface Shell {
@@ -295,6 +355,8 @@ export const localApi = {
     rows: number,
     onData: (bytes: Uint8Array) => void,
     onEvent: (e: TermEvent) => void,
+    /** A program and its arguments to run instead of the shell. */
+    command?: string[],
   ) {
     const events = new Channel<ArrayBuffer | TermEvent>();
     events.onmessage = (m) => {
@@ -303,7 +365,7 @@ export const localApi = {
       else if (Array.isArray(m)) onData(new Uint8Array(m as number[]));
       else onEvent(m);
     };
-    return call<void>("local_open", { termId, shellId, cols, rows, events });
+    return call<void>("local_open", { termId, shellId, cols, rows, command: command ?? null, events });
   },
   write: (termId: string, data: string) => call<void>("local_write", { termId, data }),
   resize: (termId: string, cols: number, rows: number) => call<void>("local_resize", { termId, cols, rows }),

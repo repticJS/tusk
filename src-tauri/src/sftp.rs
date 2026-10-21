@@ -41,8 +41,17 @@ pub async fn session(conn: &Connection) -> AppResult<Arc<SftpSession>> {
 /// Runs a command on a separate exec channel of the same connection and
 /// returns its stdout. Used for small helper queries, never the user's shell.
 pub async fn exec_capture(conn: &Connection, cmd: &str) -> AppResult<(String, Option<u32>)> {
+    exec_on(&conn.handle, cmd, Duration::from_secs(8)).await
+}
+
+/// Runs a command on its own exec channel and returns stdout and exit status.
+pub async fn exec_on(
+    handle: &russh::client::Handle<crate::ssh::Client>,
+    cmd: &str,
+    timeout: Duration,
+) -> AppResult<(String, Option<u32>)> {
     let run = async {
-        let mut ch = conn.handle.channel_open_session().await.map_err(sftp_err)?;
+        let mut ch = handle.channel_open_session().await.map_err(sftp_err)?;
         ch.exec(true, cmd).await.map_err(sftp_err)?;
         let mut out = Vec::new();
         let mut status = None;
@@ -56,7 +65,7 @@ pub async fn exec_capture(conn: &Connection, cmd: &str) -> AppResult<(String, Op
         }
         Ok::<_, AppError>((String::from_utf8_lossy(&out).into_owned(), status))
     };
-    tokio::time::timeout(Duration::from_secs(8), run)
+    tokio::time::timeout(timeout, run)
         .await
         .map_err(|_| AppError::msg("The server took too long to answer"))?
 }
