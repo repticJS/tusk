@@ -3,6 +3,7 @@ mod error;
 mod local;
 mod sftp;
 mod ssh;
+mod stats;
 mod store;
 mod tunnel;
 
@@ -486,6 +487,17 @@ async fn sftp_upload(
     sftp::upload(&conn, &state.transfers, &transfer_id, &local, &remote_dir, events).await
 }
 
+/// CPU, memory, disk and network counters of a terminal's server.
+#[tauri::command]
+async fn ssh_stats(state: State<'_, AppState>, term_id: String) -> AppResult<stats::Snapshot> {
+    stats::snapshot(&*state.ssh.connection(&term_id).await?).await
+}
+
+#[tauri::command]
+async fn ssh_processes(state: State<'_, AppState>, term_id: String) -> AppResult<stats::Processes> {
+    stats::processes(&*state.ssh.connection(&term_id).await?).await
+}
+
 #[tauri::command]
 fn sftp_cancel(state: State<'_, AppState>, transfer_id: String) {
     state.transfers.cancel(&transfer_id);
@@ -572,6 +584,8 @@ pub fn run() {
             sftp_download,
             sftp_upload,
             sftp_cancel,
+            ssh_stats,
+            ssh_processes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tusk");

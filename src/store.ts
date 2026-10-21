@@ -139,6 +139,8 @@ interface State {
   theme: "dark" | "light";
   rowLimit: number;
   filePanel: FilePanelPrefs;
+  /** Show the server stats strip under SSH terminals. */
+  statsBar: boolean;
   connections: ConnectionConfig[];
   sshHosts: SshHost[];
   folders: Folder[];
@@ -186,6 +188,7 @@ interface State {
   openTerminalTab(hostId: string): void;
   openRemoteFile(termId: string, hostId: string, path: string): void;
   setFilePanel(patch: Partial<FilePanelPrefs>): void;
+  setStatsBar(on: boolean): void;
   setDirty(id: string, dirty: boolean): void;
   createFolder(parentId: string | null): Promise<void>;
   renameFolder(id: string, name: string): Promise<void>;
@@ -266,6 +269,7 @@ export const useApp = create<State>()(
       theme: "dark",
       rowLimit: 10000,
       filePanel: { open: true, follow: true, showHidden: false },
+      statsBar: true,
       connections: [],
       sshHosts: [],
       folders: [],
@@ -368,6 +372,7 @@ export const useApp = create<State>()(
       },
 
       setFilePanel: (patch) => set((s) => ({ filePanel: { ...s.filePanel, ...patch } })),
+      setStatsBar: (statsBar) => set({ statsBar }),
       async createFolder(parentId) {
         const id = crypto.randomUUID();
         try {
@@ -778,6 +783,7 @@ export const useApp = create<State>()(
         theme: s.theme,
         rowLimit: s.rowLimit,
         filePanel: s.filePanel,
+        statsBar: s.statsBar,
         collapsedFolders: s.collapsedFolders,
         // SSH sessions don't survive a restart, so their tabs aren't restored.
         tabs: s.tabs.filter((t) => isDbTab(t)),

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Server stats for SSH terminals: a live strip under the terminal shows CPU, memory, disk, network, load, uptime and logged-in users. Click it for graphs, all disks and the top processes. Works with Linux servers, and uses the terminal's own connection (no extra login).
+
 ## 0.4.0
 
 - Local terminals: PowerShell, Command Prompt, Git Bash and WSL distros in tabs, found automatically. Open one from the new monitor button at the top of the sidebar.

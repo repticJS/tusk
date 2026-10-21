@@ -32,6 +32,7 @@ Works with PostgreSQL 9.6 and newer (tested against 9.6, 10, 11 and 16).
 | Auth | Password (with keyboard-interactive fallback), private key files (OpenSSH or PuTTY `.ppk`, with passphrase), SSH agent (Windows OpenSSH agent or Pageant). Secrets go to Windows Credential Manager. |
 | Host keys | Fingerprint confirmation on first connect, remembered afterwards; a clear warning if a server's key changes. Keys already in `~/.ssh/known_hosts` are trusted. |
 | Terminal | xterm.js with GPU rendering, 256 colors and Unicode, clickable links, find (Ctrl+Shift+F), resize follows the window, press Enter to reconnect |
+| Server stats | A strip under each terminal with live CPU, memory, disk, network, load, uptime and users (Linux servers). Click it for 3-minute graphs, every disk, and the top processes by CPU. Toggle with **Stats**. |
 | Clipboard | Ctrl+C copies a selection (otherwise sends interrupt), Ctrl+V pastes, right-click copies a selection or pastes (PuTTY style) |
 
 ### Local terminals and multi-exec
@@ -111,6 +112,7 @@ Windows 10 and 11 already include WebView2, which Tauri uses for the UI.
 src-tauri/src/
   db.rs        sessions, query execution (simple protocol + Describe for column types), cancel
   ssh.rs       SSH terminals: connect, host-key checks, auth, PTY shell streamed to the UI
+  stats.rs     server performance stats over a terminal's connection (/proc, df)
   sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
   local.rs     local shells in a pseudo-terminal (ConPTY on Windows), shell detection
   tunnel.rs    SSH port forwarding (local, remote, SOCKS), shared per-host connections, DB tunnels

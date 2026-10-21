@@ -15,6 +15,7 @@ import {
 import { useEffect, useState } from "react";
 import type { SshHost, TunnelConfig, TunnelKind, TunnelStatus } from "../lib/api";
 import { blankTunnel } from "../lib/defaults";
+import { fmtBytes } from "../lib/format";
 import { useApp, type TunnelsTab as TunnelsTabModel } from "../store";
 import { Field, Modal, Spinner, useMenu } from "./ui";
 
@@ -41,18 +42,6 @@ const KINDS: { kind: TunnelKind; label: string; short: string; explain: string }
 
 const LOOPBACK = "127.0.0.1";
 const ALL = "0.0.0.0";
-
-function fmtBytes(n: number) {
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
-}
 
 /** Where a client connects for a local or dynamic tunnel. */
 const localAddress = (t: TunnelConfig, port: number) => `${t.bindHost === ALL ? "localhost" : t.bindHost || "localhost"}:${port}`;

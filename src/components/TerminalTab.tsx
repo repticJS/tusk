@@ -7,12 +7,13 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { ChevronDown, ChevronUp, FolderTree, Radio, RotateCw, Search, X } from "lucide-react";
+import { Activity, ChevronDown, ChevronUp, FolderTree, Radio, RotateCw, Search, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { DbError, localApi, sshApi } from "../lib/api";
 import { broadcast, registerTerminal } from "../lib/multiexec";
 import { useApp, type LocalTab, type TerminalTab as TerminalTabT } from "../store";
+import { StatsBar } from "./ServerStats";
 import { SftpPanel } from "./SftpPanel";
 import { Spinner } from "./ui";
 
@@ -88,6 +89,7 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
   const [searchOpen, setSearchOpen] = useState(false);
   const [followSignal, setFollowSignal] = useState(0);
   const exitStatus = useRef<number | null>(null);
+  const statsOn = useApp((s) => s.statsBar) && !isLocal;
   // Files (SFTP) are for SSH terminals, and hidden in the tiled view.
   const filesOpen = useApp((s) => s.filePanel.open) && !isLocal && !tiled;
   const setFilePanel = useApp((s) => s.setFilePanel);
@@ -397,6 +399,15 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
         >
           <Radio size={13} />
         </button>
+        {!isLocal && (
+          <button
+            className={`btn-ghost h-6 px-1.5 ${statsOn ? "text-accent" : ""}`}
+            title={statsOn ? "Hide server stats" : "Show server stats (CPU, memory, disk, network)"}
+            onClick={() => useApp.getState().setStatsBar(!statsOn)}
+          >
+            <Activity size={13} /> Stats
+          </button>
+        )}
         {!isLocal && !tiled && (
           <button
             className={`btn-ghost h-6 px-1.5 ${filesOpen ? "text-accent" : ""}`}
@@ -477,6 +488,7 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
           </div>
         </Panel>
       </Group>
+      {statsOn && <StatsBar termId={tab.id} active={(active || tiled) && state === "connected"} />}
     </div>
   );
 }

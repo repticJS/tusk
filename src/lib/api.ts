@@ -233,6 +233,48 @@ export const sshApi = {
   close: (termId: string) => call<void>("ssh_close", { termId }),
 };
 
+// ---- server stats ----
+
+export interface ServerDisk {
+  mount: string;
+  filesystem: string;
+  size: number;
+  used: number;
+}
+
+/** Raw counters from a Linux server; rates come from comparing two samples. */
+export interface ServerStats {
+  cpuBusy: number;
+  cpuTotal: number;
+  cores: number;
+  memTotal: number;
+  memAvailable: number;
+  swapTotal: number;
+  swapFree: number;
+  load: [number, number, number];
+  uptime: number;
+  netRx: number;
+  netTx: number;
+  disks: ServerDisk[];
+  users: number;
+  hostname: string;
+  os: string;
+}
+
+export interface ServerProcess {
+  pid: number;
+  user: string;
+  /** CPU time used since start, in jiffies. */
+  ticks: number;
+  rss: number;
+  command: string;
+}
+
+export const statsApi = {
+  snapshot: (termId: string) => call<ServerStats>("ssh_stats", { termId }),
+  processes: (termId: string) => call<{ cpuTotal: number; list: ServerProcess[] }>("ssh_processes", { termId }),
+};
+
 // ---- local terminals ----
 
 export interface Shell {
