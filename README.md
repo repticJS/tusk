@@ -48,6 +48,10 @@ The **Discover** tab (radar button at the top of the sidebar, or right-click an 
 - **Databases:** listening PostgreSQL, MySQL/MariaDB, Redis, MongoDB, SQL Server and more, with PostgreSQL versions and data folders. **Add connection** fills in a PostgreSQL connection, through the SSH host when needed. Other databases can be forwarded to this PC with one click.
 - **Docker / Podman containers:** state, image and ports, with start, stop, restart, live logs and a shell inside the container. Database containers get **Add connection** too, filled in from their environment (`POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_PASSWORD`).
 
+### PM2
+
+Each scan also lists the PM2 apps of the SSH user (and on this PC): status, CPU, memory, uptime and restarts, refreshed every few seconds while Discover is open. Start, stop, restart, reload (cluster apps, no downtime) or delete apps, clear their logs, reset counters, save the process list, start saved apps when PM2 isn't running, and start new apps from a form. **Logs** and **Monitor** open `pm2 logs` / `pm2 monit` in a terminal tab. PM2 installed through nvm, Volta, n or npm's global folder is found even though it's not on the PATH of non-interactive SSH sessions, and listing never starts a PM2 daemon by itself.
+
 ### SSH tunnels
 
 Open the **Tunnels** tab from the sidebar's tunnel button, the status bar, or the command palette.
@@ -121,6 +125,7 @@ src-tauri/src/
   ssh.rs       SSH terminals: connect, host-key checks, auth, PTY shell streamed to the UI
   stats.rs     server performance stats over a terminal's connection (/proc, df)
   sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
+  pm2.rs       PM2 apps: listing (pm2 jlist), actions, new apps, logs/monit terminals
   discover.rs  finds databases and Docker containers (ss/netstat/proc, ps, pg_lsclusters, docker)
   local.rs     local shells in a pseudo-terminal (ConPTY on Windows), shell detection
   tunnel.rs    SSH port forwarding (local, remote, SOCKS), shared per-host connections, DB tunnels

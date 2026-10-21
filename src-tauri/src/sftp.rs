@@ -75,7 +75,7 @@ pub async fn exec_on(
 /// so the shell is the sibling of this command that isn't itself.
 pub async fn shell_cwd(conn: &Connection) -> AppResult<Option<String>> {
     const CMD: &str = r#"pids=$(pgrep -P "$PPID" 2>/dev/null || ps -o pid= --ppid "$PPID" 2>/dev/null); for p in $pids; do if [ "$p" != "$$" ]; then d=$(readlink "/proc/$p/cwd" 2>/dev/null) && { printf '%s\n' "$d"; exit 0; }; fi; done; exit 1"#;
-    let (out, status) = exec_capture(conn, CMD).await?;
+    let (out, status) = exec_capture(conn, &crate::ssh::posix(CMD)).await?;
     let dir = out.lines().next().unwrap_or("").trim().to_string();
     Ok(if status == Some(0) && dir.starts_with('/') { Some(dir) } else { None })
 }

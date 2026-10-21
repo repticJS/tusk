@@ -77,9 +77,10 @@ pub struct ScanResult {
     pub os: String,
     pub databases: Vec<FoundDb>,
     pub docker: Docker,
+    pub pm2: crate::pm2::Pm2,
 }
 
-pub const SCAN_SCRIPT: &str = r#"export LC_ALL=C
+const BASE_SCRIPT: &str = r#"export LC_ALL=C
 echo @os; (. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME") || uname -sr
 if command -v ss >/dev/null 2>&1; then echo @ss; ss -H -ltnp 2>/dev/null
 elif command -v netstat >/dev/null 2>&1; then echo @netstat; netstat -ltnp 2>/dev/null
@@ -101,11 +102,15 @@ if [ -n "$D" ]; then
   echo @docker_ps; $D ps -a --no-trunc --format '{{json .}}' 2>/dev/null
   ids=$($D ps -aq 2>/dev/null)
   if [ -n "$ids" ]; then echo @docker_inspect; $D inspect $ids 2>/dev/null; fi
-elif ! command -v docker >/dev/null 2>&1 && ! command -v podman >/dev/null 2>&1; then echo @docker_missing; fi
-exit 0"#;
+elif ! command -v docker >/dev/null 2>&1 && ! command -v podman >/dev/null 2>&1; then echo @docker_missing; fi"#;
+
+/// The whole scan: databases, containers and PM2 apps.
+pub fn scan_script() -> String {
+    format!("{BASE_SCRIPT}\n{}\nexit 0", crate::pm2::list_script())
+}
 
 /// Splits "@name" sections; content lines keep their text.
-fn sections(text: &str) -> HashMap<String, Vec<&str>> {
+pub fn sections(text: &str) -> HashMap<String, Vec<&str>> {
     let mut out: HashMap<String, Vec<&str>> = HashMap::new();
     let mut current = String::new();
     for line in text.lines() {
@@ -522,6 +527,7 @@ pub fn parse_scan(text: &str) -> ScanResult {
         os: s.get("os").and_then(|l| l.first()).map(|v| v.trim().to_string()).unwrap_or_default(),
         databases: found.into_values().collect(),
         docker,
+        pm2: crate::pm2::parse(&s),
     }
 }
 
@@ -554,7 +560,7 @@ pub async fn scan_local() -> AppResult<ScanResult> {
 
 #[cfg(not(windows))]
 fn local_scan_text() -> AppResult<String> {
-    let out = std::process::Command::new("sh").arg("-c").arg(SCAN_SCRIPT).output()?;
+    let out = std::process::Command::new("sh").arg("-c").arg(scan_script()).output()?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -577,7 +583,7 @@ fn run_text(program: &str, args: &[&str]) -> Option<(bool, String)> {
     Some((out.status.success(), text))
 }
 
-/// The same sections as SCAN_SCRIPT, from Windows tools.
+/// The same sections as scan_script(), from Windows tools.
 #[cfg(windows)]
 fn local_scan_text() -> AppResult<String> {
     let mut t = String::from("@os\nWindows\n@netstat_win\n");
@@ -624,6 +630,7 @@ fn local_scan_text() -> AppResult<String> {
             t.push('\n');
         }
     }
+    t.push_str(&crate::pm2::local_list_text());
     Ok(t)
 }
 

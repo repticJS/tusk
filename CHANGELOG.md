@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0
+
+- PM2 support: Discover now lists PM2 apps on your servers (and this PC) with live status, CPU, memory, uptime and restarts. Start, stop, restart, reload, delete, clear logs, reset counters, save the process list, bring back saved apps, and start new apps. Logs and Monitor open in a terminal tab.
+- Works with PM2 installed through nvm, Volta and similar, and never starts a PM2 daemon just by looking.
+- SSH terminals count PM2 apps in their header.
+- Server scans, stats and the file panel now work for users whose login shell is fish or tcsh.
+
 ## 0.5.0
 
 - Discover: scan this PC and your SSH servers for databases (PostgreSQL, MySQL, MariaDB, Redis, MongoDB, SQL Server and more) and Docker or Podman containers. Open it from the radar button at the top of the sidebar.

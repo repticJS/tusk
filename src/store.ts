@@ -8,12 +8,14 @@ import {
   tunnelApi,
   withSshPrompts,
   discoverApi,
+  pm2Api,
   type AppErrorInfo,
   type ContainerAction,
   type ContainerInfo,
   type ConnectionConfig,
   type Folder,
   type ItemKind,
+  type Pm2Action,
   type ScanResult,
   type SessionRef,
   type Shell,
@@ -251,6 +253,12 @@ interface State {
   scan(target: string, viaTerminal?: string): Promise<void>;
   scanAll(): Promise<void>;
   containerAction(target: string, c: ContainerInfo, action: ContainerAction): Promise<void>;
+  /** Re-reads just the PM2 apps of a scanned target. */
+  pm2Refresh(target: string): Promise<void>;
+  /** Runs a PM2 action; `app` is an id, a name or "all". Resolves true on success. */
+  pm2Action(target: string, action: Pm2Action, app?: string, label?: string): Promise<boolean>;
+  pm2Start(target: string, app: { script: string; name: string; cwd: string; instances: number }): Promise<boolean>;
+  pm2Terminal(target: string, kind: "logs" | "monit", app?: { id: number; name: string }): Promise<void>;
   openDiscoverTab(focus?: string): void;
   setMultiExec(patch: Partial<MultiExec>): void;
   /** Turns multi-exec on (for every open terminal) or off. */
@@ -651,6 +659,64 @@ export const useApp = create<State>()(
           get().showToast(`${c.name}: ${e instanceof Error ? e.message : String(e)}`, "error");
         }
         await get().scan(target);
+      },
+
+      async pm2Refresh(target) {
+        const current = get().scans[target]?.result;
+        if (!current) return;
+        try {
+          const pm2 = await pm2Api.list(target === "local" ? null : target);
+          set((s) => {
+            const scan = s.scans[target];
+            if (!scan?.result) return {};
+            return { scans: { ...s.scans, [target]: { ...scan, result: { ...scan.result, pm2 } } } };
+          });
+        } catch {
+          // Keep the last list; a full rescan reports problems.
+        }
+      },
+
+      async pm2Action(target, action, app, label) {
+        const past: Record<Pm2Action, string> = {
+          start: "started",
+          stop: "stopped",
+          restart: "restarted",
+          reload: "reloaded",
+          delete: "deleted",
+          flush: "logs cleared",
+          reset: "counters reset",
+          save: "process list saved",
+          resurrect: "saved apps started",
+        };
+        let ok = true;
+        try {
+          await pm2Api.action(target === "local" ? null : target, action, app);
+          get().showToast(label ? `${label}: ${past[action]}` : `PM2: ${past[action]}`, "ok");
+        } catch (e) {
+          ok = false;
+          get().showToast(`${label ?? "PM2"}: ${e instanceof Error ? e.message : String(e)}`, "error");
+        }
+        await get().pm2Refresh(target);
+        return ok;
+      },
+
+      async pm2Start(target, app) {
+        try {
+          await pm2Api.start(target === "local" ? null : target, app.script, app.name, app.cwd, app.instances);
+          get().showToast(`Started ${app.name || app.script}`, "ok");
+          await get().pm2Refresh(target);
+          return true;
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+          return false;
+        }
+      },
+
+      async pm2Terminal(target, kind, app) {
+        const cmd = await pm2Api.terminal(kind, app ? String(app.id) : undefined);
+        const title = kind === "monit" ? "pm2 monit" : app ? `logs: ${app.name}` : "pm2 logs";
+        if (target === "local") get().openLocalTerminal(undefined, { title, command: cmd.local });
+        else get().openTerminalTab(target, { title, command: cmd.remote });
       },
 
       openDiscoverTab(focus) {

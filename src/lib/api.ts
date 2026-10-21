@@ -318,10 +318,48 @@ export interface DockerInfo {
   containers: ContainerInfo[];
 }
 
+export interface Pm2Process {
+  id: number;
+  name: string;
+  /** online | stopped | stopping | errored | launching | waiting restart */
+  status: string;
+  pid?: number | null;
+  cpu: number;
+  memory: number;
+  /** Seconds since the last (re)start, when online. */
+  uptime?: number | null;
+  restarts: number;
+  unstableRestarts: number;
+  /** fork | cluster */
+  mode: string;
+  script: string;
+  cwd: string;
+  interpreter: string;
+  nodeVersion?: string | null;
+  appVersion?: string | null;
+  namespace?: string | null;
+  outLog?: string | null;
+  errLog?: string | null;
+  watch: boolean;
+}
+
+export interface Pm2Info {
+  /** ok | stopped (installed, no daemon) | missing | error */
+  status: "ok" | "stopped" | "missing" | "error";
+  version?: string | null;
+  message?: string | null;
+  processes: Pm2Process[];
+  /** Other users running their own PM2. */
+  otherUsers: string[];
+}
+
+export type Pm2Action = "start" | "stop" | "restart" | "reload" | "delete" | "flush" | "reset" | "save" | "resurrect";
+
 export interface ScanResult {
   os: string;
   databases: FoundDb[];
   docker: DockerInfo;
+  pm2: Pm2Info;
 }
 
 export type ContainerAction = "start" | "stop" | "restart";
@@ -333,6 +371,18 @@ export const discoverApi = {
   /** hostId null means this PC. */
   docker: (hostId: string | null, command: string, action: ContainerAction, id: string) =>
     withSshPrompts(() => call<void>("docker_action", { hostId, command, action, id })),
+};
+
+/** PM2 on an SSH host, or this PC when hostId is null. */
+export const pm2Api = {
+  list: (hostId: string | null) => withSshPrompts(() => call<Pm2Info>("pm2_list", { hostId })),
+  action: (hostId: string | null, action: Pm2Action, target?: string) =>
+    withSshPrompts(() => call<void>("pm2_action", { hostId, action, target: target ?? null })),
+  start: (hostId: string | null, script: string, name: string, cwd: string, instances: number) =>
+    withSshPrompts(() => call<void>("pm2_start", { hostId, script, name, cwd, instances })),
+  /** The command a terminal runs for `pm2 logs` / `pm2 monit`. */
+  terminal: (kind: "logs" | "monit", target?: string) =>
+    call<{ remote: string; local: string[] }>("pm2_terminal", { kind, target: target ?? null }),
 };
 
 // ---- local terminals ----

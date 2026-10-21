@@ -85,8 +85,12 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
     useShallow((s) => {
       const r = tab.kind === "terminal" ? s.scans[tab.hostId]?.result : undefined;
       return r
-        ? { dbs: r.databases.length + r.docker.containers.filter((c) => c.dbKind).length, containers: r.docker.containers.length }
-        : { dbs: -1, containers: -1 };
+        ? {
+            dbs: r.databases.length + r.docker.containers.filter((c) => c.dbKind).length,
+            containers: r.docker.containers.length,
+            apps: r.pm2.processes.length,
+          }
+        : { dbs: -1, containers: -1, apps: -1 };
     }),
   );
   const theme = useApp((s) => s.theme);
@@ -398,16 +402,20 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
         <span className="truncate text-faint">{target}</span>
         {state === "connecting" && <Spinner size={11} />}
         <div className="flex-1" />
-        {(found.dbs > 0 || found.containers > 0) && (
+        {(found.dbs > 0 || found.containers > 0 || found.apps > 0) && (
           <button
             className="flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-px text-[11px] text-muted hover:text-text"
-            title="Databases and containers on this server"
+            title="Databases, containers and PM2 apps on this server"
             onClick={() => tab.kind === "terminal" && useApp.getState().openDiscoverTab(tab.hostId)}
           >
             <Radar size={11} className="text-accent" />
-            {found.dbs > 0 && `${found.dbs} database${found.dbs === 1 ? "" : "s"}`}
-            {found.dbs > 0 && found.containers > 0 && " · "}
-            {found.containers > 0 && `${found.containers} container${found.containers === 1 ? "" : "s"}`}
+            {[
+              found.dbs > 0 && `${found.dbs} database${found.dbs === 1 ? "" : "s"}`,
+              found.containers > 0 && `${found.containers} container${found.containers === 1 ? "" : "s"}`,
+              found.apps > 0 && `${found.apps} PM2 app${found.apps === 1 ? "" : "s"}`,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
           </button>
         )}
         {inMultiExec && (

@@ -49,6 +49,13 @@ pub struct Forward {
 /// Remote forwards on one SSH connection, by the port opened on the server.
 pub type RemoteForwards = Arc<StdMutex<HashMap<u32, Forward>>>;
 
+/// How long a link used only for commands stays open after the last one.
+const LINGER: Duration = Duration::from_secs(60);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 /// What a link needs to (re)connect.
 #[derive(Clone)]
 pub struct Creds {
@@ -63,6 +70,9 @@ struct Link {
     forwards: RemoteForwards,
     /// Commands running on the link (see `Tunnels::exec`); keeps it open.
     busy: AtomicU64,
+    /// When the last command finished (ms since the epoch); the link stays
+    /// up a little while after, so repeated refreshes reuse it.
+    last_used: AtomicU64,
 }
 
 impl Link {
@@ -173,6 +183,7 @@ impl Tunnels {
                 conn: Default::default(),
                 forwards: Default::default(),
                 busy: AtomicU64::new(0),
+                last_used: AtomicU64::new(0),
             })
         });
         *link.creds.lock().unwrap() = creds;
@@ -277,7 +288,9 @@ impl Tunnels {
         let link = {
             let mut links = self.links.lock().await;
             match links.get(host_id) {
-                Some(l) if l.busy.load(Ordering::SeqCst) == 0 => links.remove(host_id),
+                Some(l) if l.busy.load(Ordering::SeqCst) == 0 && now_ms().saturating_sub(l.last_used.load(Ordering::SeqCst)) >= LINGER.as_millis() as u64 => {
+                    links.remove(host_id)
+                }
                 _ => None,
             }
         };
@@ -288,7 +301,7 @@ impl Tunnels {
 
     /// Runs a command on a host over its shared link (connecting if needed),
     /// for scans and quick actions that don't belong to a terminal.
-    pub async fn exec(&self, creds: Creds, cmd: &str, timeout: Duration) -> AppResult<(String, Option<u32>)> {
+    pub async fn exec(self: &Arc<Self>, creds: Creds, cmd: &str, timeout: Duration) -> AppResult<(String, Option<u32>)> {
         let host_id = creds.config.id.clone();
         let link = self.link_marked(creds, true).await;
         let accept = self.accepted.lock().unwrap().remove(&host_id);
@@ -297,8 +310,14 @@ impl Tunnels {
             crate::sftp::exec_on(&handle, cmd, timeout).await
         }
         .await;
+        link.last_used.store(now_ms(), Ordering::SeqCst);
         link.busy.fetch_sub(1, Ordering::SeqCst);
-        self.release_link(&host_id).await;
+        // Close it later if nothing else comes along.
+        let this = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(LINGER).await;
+            this.release_link(&host_id).await;
+        });
         result
     }
 

@@ -426,7 +426,7 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
         match cfg.start_dir.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
         // Start the login shell inside the folder rather than typing a `cd`
         // into it, so nothing shows on screen or in the shell history.
-            Some(dir) => channel.exec(false, start_in_dir_command(dir)).await.map_err(ssh_err)?,
+            Some(dir) => channel.exec(false, posix(&start_in_dir_command(dir))).await.map_err(ssh_err)?,
             None => channel.request_shell(false).await.map_err(ssh_err)?,
         }
     }
@@ -478,8 +478,14 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
 }
 
 /// Quotes a string for a POSIX shell.
-fn sh_quote(s: &str) -> String {
+pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Runs a POSIX script through `sh`, whatever the user's login shell is
+/// (fish and tcsh can't run sh syntax directly).
+pub fn posix(script: &str) -> String {
+    format!("sh -c {}", sh_quote(script))
 }
 
 /// A command that changes to `dir` (keeping `~` meaning home) and then
@@ -514,5 +520,6 @@ mod tests {
         assert!(cmd.ends_with(r#"exec "${SHELL:-/bin/sh}" -l"#), "{cmd}");
         assert!(start_in_dir_command("~/apps/my app").starts_with("cd ~/'apps/my app' "));
         assert!(start_in_dir_command("~").starts_with("cd ~ "));
+        assert_eq!(posix("echo 'hi'; exit 0"), r"sh -c 'echo '\''hi'\''; exit 0'");
     }
 }

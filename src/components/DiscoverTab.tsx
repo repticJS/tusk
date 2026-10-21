@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ContainerInfo, FoundDb, ScanResult, SshHost } from "../lib/api";
 import { blankConnection, blankTunnel } from "../lib/defaults";
 import { useApp, type DiscoverTab as DiscoverTabModel, type ScanState } from "../store";
+import { Pm2Section } from "./Pm2Section";
 import { Spinner } from "./ui";
 
 export const DB_LABELS: Record<string, string> = {
@@ -79,6 +80,18 @@ export function DiscoverTab({ active }: { tab: DiscoverTabModel; active: boolean
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Keep PM2 numbers (CPU, memory, uptime, status) current while visible.
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => {
+      const s = useApp.getState();
+      for (const [target, sc] of Object.entries(s.scans)) {
+        if (sc?.state === "done" && sc.result?.pm2.status === "ok") void s.pm2Refresh(target);
+      }
+    }, 4000);
+    return () => clearInterval(t);
+  }, [active]);
+
   // Bring the requested host into view (and scan it if it never was).
   useEffect(() => {
     if (!active || !focus) return;
@@ -95,8 +108,8 @@ export function DiscoverTab({ active }: { tab: DiscoverTabModel; active: boolean
           <div className="flex-1">
             <div className="text-[17px] font-semibold tracking-tight">Discover</div>
             <div className="text-[12.5px] text-muted">
-              Databases and Docker containers on this PC and your SSH servers. SSH servers are scanned when you open a terminal
-              to them.
+              Databases, Docker containers and PM2 apps on this PC and your SSH servers. SSH servers are scanned when you open
+              a terminal to them.
             </div>
           </div>
           <button className="btn-primary" onClick={() => void scanAll()} disabled={anyScanning}>
@@ -211,6 +224,7 @@ function Findings({ target, host, result }: { target: string; host?: SshHost; re
           ))}
         </div>
       )}
+      <Pm2Section target={target} pm2={result.pm2} windows={local && result.os === "Windows"} />
     </div>
   );
 }

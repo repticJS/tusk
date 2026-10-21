@@ -59,7 +59,7 @@ fn unsupported() -> AppError {
 }
 
 pub async fn snapshot(conn: &Connection) -> AppResult<Snapshot> {
-    let (out, status) = exec_capture(conn, SNAPSHOT_CMD).await?;
+    let (out, status) = exec_capture(conn, &crate::ssh::posix(SNAPSHOT_CMD)).await?;
     if status == Some(3) {
         return Err(unsupported());
     }
@@ -203,7 +203,7 @@ echo @stat; cat /proc/[0-9]*/stat 2>/dev/null
 echo @ps; ps -eo pid=,user=,rss=,args= 2>/dev/null | cut -c1-300"#;
 
 pub async fn processes(conn: &Connection) -> AppResult<Processes> {
-    let (out, status) = exec_capture(conn, PROCESSES_CMD).await?;
+    let (out, status) = exec_capture(conn, &crate::ssh::posix(PROCESSES_CMD)).await?;
     if status == Some(3) {
         return Err(unsupported());
     }

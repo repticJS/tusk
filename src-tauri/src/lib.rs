@@ -2,6 +2,7 @@ mod db;
 mod discover;
 mod error;
 mod local;
+mod pm2;
 mod sftp;
 mod ssh;
 mod stats;
@@ -21,7 +22,7 @@ struct AppState {
     sessions: Sessions,
     ssh: SshSessions,
     transfers: sftp::Transfers,
-    tunnels: tunnel::Tunnels,
+    tunnels: std::sync::Arc<tunnel::Tunnels>,
     local: local::LocalTerms,
     /// Shells found on this PC, detected once.
     shells: Mutex<Option<Vec<local::Shell>>>,
@@ -514,7 +515,7 @@ async fn discover_local() -> AppResult<discover::ScanResult> {
 #[tauri::command]
 async fn discover_host(state: State<'_, AppState>, host_id: String) -> AppResult<discover::ScanResult> {
     let creds = state.ssh_creds(&host_id)?;
-    let (out, _) = state.tunnels.exec(creds, discover::SCAN_SCRIPT, SCAN_TIMEOUT).await?;
+    let (out, _) = state.tunnels.exec(creds, &ssh::posix(&discover::scan_script()), SCAN_TIMEOUT).await?;
     Ok(discover::parse_scan(&out))
 }
 
@@ -522,7 +523,7 @@ async fn discover_host(state: State<'_, AppState>, host_id: String) -> AppResult
 #[tauri::command]
 async fn discover_terminal(state: State<'_, AppState>, term_id: String) -> AppResult<discover::ScanResult> {
     let conn = state.ssh.connection(&term_id).await?;
-    let (out, _) = sftp::exec_on(&conn.handle, discover::SCAN_SCRIPT, SCAN_TIMEOUT).await?;
+    let (out, _) = sftp::exec_on(&conn.handle, &ssh::posix(&discover::scan_script()), SCAN_TIMEOUT).await?;
     Ok(discover::parse_scan(&out))
 }
 
@@ -540,10 +541,70 @@ async fn docker_action(
     };
     let cmd = discover::docker_command(&command, &action, &id)?;
     let creds = state.ssh_creds(&host_id)?;
-    match state.tunnels.exec(creds, &cmd, SCAN_TIMEOUT).await? {
+    match state.tunnels.exec(creds, &ssh::posix(&cmd), SCAN_TIMEOUT).await? {
         (_, Some(0)) => Ok(()),
         (out, _) => Err(AppError::msg(out.trim().to_string())),
     }
+}
+
+// ---- PM2 ----
+
+/// Runs a PM2 script on a host (or this PC when host_id is None) and returns
+/// its output, failing with PM2's own error line.
+async fn run_pm2(state: &AppState, host_id: Option<String>, script: String) -> AppResult<String> {
+    let Some(host_id) = host_id else {
+        return pm2::run_local(script).await;
+    };
+    let creds = state.ssh_creds(&host_id)?;
+    match state.tunnels.exec(creds, &ssh::posix(&script), SCAN_TIMEOUT).await? {
+        (out, Some(0)) => Ok(out),
+        (out, _) => Err(AppError::msg(pm2::last_error(&out))),
+    }
+}
+
+/// PM2 apps on a host or this PC (refreshed often while shown).
+#[tauri::command]
+async fn pm2_list(state: State<'_, AppState>, host_id: Option<String>) -> AppResult<pm2::Pm2> {
+    let text = match host_id {
+        None => tokio::task::spawn_blocking(pm2::local_list_text).await.map_err(|e| AppError::msg(e.to_string()))?,
+        Some(h) => {
+            let creds = state.ssh_creds(&h)?;
+            state.tunnels.exec(creds, &ssh::posix(&pm2::list_script()), SCAN_TIMEOUT).await?.0
+        }
+    };
+    Ok(pm2::parse(&discover::sections(&text)))
+}
+
+/// start / stop / restart / reload / delete / flush / reset an app (id,
+/// name or "all"), or save / resurrect the process list.
+#[tauri::command]
+async fn pm2_action(
+    state: State<'_, AppState>,
+    host_id: Option<String>,
+    action: String,
+    target: Option<String>,
+) -> AppResult<()> {
+    let script = pm2::action_script(&action, target.as_deref())?;
+    run_pm2(&state, host_id, script).await.map(|_| ())
+}
+
+#[tauri::command]
+async fn pm2_start(
+    state: State<'_, AppState>,
+    host_id: Option<String>,
+    script: String,
+    name: String,
+    cwd: String,
+    instances: u32,
+) -> AppResult<()> {
+    let script = pm2::start_script(&script, &name, &cwd, instances)?;
+    run_pm2(&state, host_id, script).await.map(|_| ())
+}
+
+/// The command a terminal tab runs for `pm2 logs` or `pm2 monit`.
+#[tauri::command]
+fn pm2_terminal(kind: String, target: Option<String>) -> AppResult<pm2::TerminalCommand> {
+    pm2::terminal_command(&kind, target.as_deref())
 }
 
 /// CPU, memory, disk and network counters of a terminal's server.
@@ -587,7 +648,7 @@ pub fn run() {
                 sessions: Sessions::new(),
                 ssh: SshSessions::new(),
                 transfers: sftp::Transfers::default(),
-                tunnels: tunnel::Tunnels::default(),
+                tunnels: Default::default(),
                 local: local::LocalTerms::default(),
                 shells: Mutex::new(None),
             });
@@ -648,6 +709,10 @@ pub fn run() {
             discover_host,
             discover_terminal,
             docker_action,
+            pm2_list,
+            pm2_action,
+            pm2_start,
+            pm2_terminal,
             ssh_processes,
         ])
         .run(tauri::generate_context!())
