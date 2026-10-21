@@ -15,7 +15,7 @@ Works with PostgreSQL 9.6 and newer (tested against 9.6, 10, 11 and 16).
 
 | Area | What's there |
 |---|---|
-| Connections | Saved connections, paste a `postgres://` URL, test button, SSL modes, color tags (shown on tabs), passwords in Windows Credential Manager |
+| Connections | Saved connections, paste a `postgres://` URL, test button, SSL modes, color tags (shown on tabs), passwords in Windows Credential Manager, nested folders mixing SSH hosts and databases (drag and drop) |
 | Browser | Databases → schemas → tables, views, materialized views, functions; filter box; row estimates |
 | Table view | Data, Structure (columns, indexes, constraints, triggers), generated DDL; WHERE filter; click a header to sort; exact or estimated counts |
 | Editing | Inline and value-panel editing, NULL handling, add and delete rows, SQL preview, single-transaction commit |

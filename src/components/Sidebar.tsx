@@ -1,5 +1,9 @@
 import {
   ChevronRight,
+  FolderClosed,
+  FolderInput,
+  FolderOpen,
+  FolderPlus,
   Copy,
   Database,
   Eye,
@@ -19,11 +23,13 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ConnectionConfig, SshHost } from "../lib/api";
+import type { ConnectionConfig, Folder, ItemKind, SshHost } from "../lib/api";
+import { blankConnection, blankSshHost } from "../lib/defaults";
 import * as meta from "../lib/meta";
 import { qualified } from "../lib/sql";
+import { clickSuppressed, startTreeDrag, useTreeDrag, type DragItem } from "../lib/treeDrag";
 import { cacheKey, metaSession, useApp } from "../store";
-import { Modal, Spinner, useMenu, type MenuEntry } from "./ui";
+import { DropdownButton, Modal, Spinner, useMenu, type MenuEntry } from "./ui";
 
 function compact(n: number): string {
   if (n < 1000) return String(n);
@@ -35,12 +41,18 @@ function compact(n: number): string {
 export function Sidebar() {
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
+  const folders = useApp((s) => s.folders);
+  const status = useApp((s) => s.status);
   const openConnectionDialog = useApp((s) => s.openConnectionDialog);
   const openSshDialog = useApp((s) => s.openSshDialog);
+  const createFolder = useApp((s) => s.createFolder);
+  const moveItems = useApp((s) => s.moveItems);
+  const dragOver = useTreeDrag((s) => (s.item ? s.over : null));
   const [filter, setFilter] = useState("");
   const q = filter.trim().toLowerCase();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [menu, openMenu] = useMenu();
+  const [moving, setMoving] = useState<{ kind: ItemKind; id: string; label: string } | null>(null);
 
   const toggle = (key: string, force?: boolean) =>
     setExpanded((prev) => {
@@ -51,15 +63,58 @@ export function Sidebar() {
       return next;
     });
 
+  // While filtering, show only matching hosts/connections (and connected
+  // databases, whose tables are filtered inside), plus the folders on their path.
+  const visible = useMemo(() => {
+    if (!q) return null;
+    const keep = new Set<string>();
+    const parentOf = new Map(folders.map((f) => [f.id, f.parentId ?? null]));
+    const addPath = (folderId: string | null | undefined) => {
+      let cur = folderId ?? null;
+      for (let i = 0; cur && i <= folders.length; i++) {
+        keep.add(cur);
+        cur = parentOf.get(cur) ?? null;
+      }
+    };
+    for (const h of sshHosts)
+      if (h.name.toLowerCase().includes(q) || h.host.toLowerCase().includes(q)) {
+        keep.add(h.id);
+        addPath(h.folderId);
+      }
+    for (const c of connections)
+      if (c.name.toLowerCase().includes(q) || c.host.toLowerCase().includes(q) || status[c.id]?.state === "connected") {
+        keep.add(c.id);
+        addPath(c.folderId);
+      }
+    for (const f of folders) if (f.name.toLowerCase().includes(q)) addPath(f.id);
+    return keep;
+  }, [q, folders, sshHosts, connections, status]);
+
+  const onDrop = (item: DragItem, folderId: string | null) => {
+    if (item.kind === "folder" && item.id === folderId) return;
+    void moveItems([{ kind: item.kind, id: item.id }], folderId);
+  };
+
+  const tree: TreeCtx = { q, visible, expanded, toggle, openMenu, onDrop, onMove: setMoving };
+  const empty = connections.length === 0 && sshHosts.length === 0 && folders.length === 0;
+
   return (
     <div className="flex h-full flex-col bg-panel">
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
         <img src="/icon.svg" alt="" className="h-5 w-5" />
         <span className="text-[13.5px] font-semibold tracking-tight">Tusk</span>
         <div className="flex-1" />
-        <button className="btn-ghost h-7 px-1.5" title="New connection" onClick={() => openConnectionDialog()}>
-          <Plus size={15} />
-        </button>
+        <DropdownButton
+          className="btn-ghost h-7 px-1.5"
+          title="New connection or folder"
+          label={<Plus size={15} />}
+          items={[
+            { label: "New PostgreSQL connection", icon: <Database size={13} />, onClick: () => openConnectionDialog() },
+            { label: "New SSH host", icon: <TerminalSquare size={13} />, onClick: () => openSshDialog() },
+            "separator",
+            { label: "New folder", icon: <FolderPlus size={13} />, onClick: () => void createFolder(null) },
+          ]}
+        />
       </div>
       <div className="shrink-0 p-2">
         <div className="flex h-7 items-center gap-1.5 rounded-md border border-border bg-bg px-2 focus-within:border-accent">
@@ -78,8 +133,20 @@ export function Sidebar() {
           )}
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto px-1.5 pb-3">
-        {connections.length === 0 && sshHosts.length === 0 && (
+      <div
+        className={`min-h-0 flex-1 overflow-auto px-1.5 pb-3 ${dragOver === "" ? "bg-accent-soft/40" : ""}`}
+        data-drop=""
+        onContextMenu={(e) => {
+          if (e.target !== e.currentTarget) return;
+          e.preventDefault();
+          openMenu(e, [
+            { label: "New PostgreSQL connection", icon: <Database size={13} />, onClick: () => openConnectionDialog() },
+            { label: "New SSH host", icon: <TerminalSquare size={13} />, onClick: () => openSshDialog() },
+            { label: "New folder", icon: <FolderPlus size={13} />, onClick: () => void createFolder(null) },
+          ]);
+        }}
+      >
+        {empty && (
           <div className="px-3 py-8 text-center text-[12.5px] text-faint">
             No connections yet.
             <br />
@@ -88,62 +155,278 @@ export function Sidebar() {
             </button>
           </div>
         )}
-        {(sshHosts.length > 0 || connections.length > 0) && (
-          <>
-            <SectionHeader
-              label="SSH"
-              count={sshHosts.length}
-              open={!expanded.has("#ssh-closed")}
-              onToggle={() => toggle("#ssh-closed")}
-              onAdd={() => openSshDialog()}
-            />
-            {!expanded.has("#ssh-closed") &&
-              sshHosts
-                .filter((h) => !q || h.name.toLowerCase().includes(q) || h.host.toLowerCase().includes(q))
-                .map((h) => <SshNode key={h.id} host={h} openMenu={openMenu} />)}
-            <SectionHeader
-              label="PostgreSQL"
-              count={connections.length}
-              open={!expanded.has("#pg-closed")}
-              onToggle={() => toggle("#pg-closed")}
-              onAdd={() => openConnectionDialog()}
-            />
-            {!expanded.has("#pg-closed") &&
-              connections.map((c) => (
-                <ConnectionNode key={c.id} conn={c} filter={q} expanded={expanded} toggle={toggle} openMenu={openMenu} />
-              ))}
-          </>
-        )}
+        <FolderContents parentId={null} depth={0} tree={tree} />
+        {/* Spare space below the tree is a drop target for the top level. */}
+        <div className="h-8" />
       </div>
+      <DragGhost />
+      {moving && <MoveDialog item={moving} onClose={() => setMoving(null)} />}
       {menu}
     </div>
   );
 }
 
-function SectionHeader(props: { label: string; count: number; open: boolean; onToggle: () => void; onAdd: () => void }) {
+interface TreeCtx {
+  q: string;
+  /** Ids to show while filtering; null when not filtering. */
+  visible: Set<string> | null;
+  expanded: Set<string>;
+  toggle: (key: string, force?: boolean) => void;
+  openMenu: (at: { clientX: number; clientY: number }, items: MenuEntry[]) => void;
+  onDrop: (item: DragItem, folderId: string | null) => void;
+  onMove: (item: { kind: ItemKind; id: string; label: string }) => void;
+}
+
+const byName = (a: { name: string }, b: { name: string }) =>
+  a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+
+/** A folder's children: subfolders first, then hosts and connections, by name. */
+function FolderContents({ parentId, depth, tree }: { parentId: string | null; depth: number; tree: TreeCtx }) {
+  const folders = useApp((s) => s.folders);
+  const connections = useApp((s) => s.connections);
+  const sshHosts = useApp((s) => s.sshHosts);
+  const inHere = (f?: string | null) => (f ?? null) === parentId;
+  const show = (id: string) => !tree.visible || tree.visible.has(id);
+  const subfolders = folders.filter((f) => inHere(f.parentId) && show(f.id)).sort(byName);
+  const items = [
+    ...connections.filter((c) => inHere(c.folderId) && show(c.id)).map((c) => ({ name: c.name, conn: c })),
+    ...sshHosts.filter((h) => inHere(h.folderId) && show(h.id)).map((h) => ({ name: h.name, host: h })),
+  ].sort(byName);
   return (
-    <div
-      className="group mt-2 flex h-7 cursor-default items-center gap-1 px-1 text-[11px] font-semibold tracking-wider text-faint uppercase first:mt-0 hover:text-muted"
-      onClick={props.onToggle}
-    >
-      <ChevronRight size={11} className={`transition-transform ${props.open ? "rotate-90" : ""}`} />
-      <span className="flex-1">{props.label}</span>
-      <span className="font-normal group-hover:hidden">{props.count || ""}</span>
-      <button
-        className="hidden rounded p-0.5 text-muted group-hover:block hover:bg-hover hover:text-text"
-        title={`New ${props.label} connection`}
-        onClick={(e) => {
-          e.stopPropagation();
-          props.onAdd();
+    <>
+      {subfolders.map((f) => (
+        <FolderNode key={f.id} folder={f} depth={depth} tree={tree} />
+      ))}
+      {items.map((it) =>
+        "conn" in it && it.conn ? (
+          <div key={it.conn.id} data-drop={parentId ?? ""}>
+            <ConnectionNode
+              conn={it.conn}
+              base={depth}
+              filter={tree.q}
+              expanded={tree.expanded}
+              toggle={tree.toggle}
+              openMenu={tree.openMenu}
+              onDrop={tree.onDrop}
+              onMove={tree.onMove}
+            />
+          </div>
+        ) : "host" in it && it.host ? (
+          <div key={it.host.id} data-drop={parentId ?? ""}>
+            <SshNode host={it.host} depth={depth} openMenu={tree.openMenu} onDrop={tree.onDrop} onMove={tree.onMove} />
+          </div>
+        ) : null,
+      )}
+    </>
+  );
+}
+
+function FolderNode({ folder, depth, tree }: { folder: Folder; depth: number; tree: TreeCtx }) {
+  const collapsed = useApp((s) => s.collapsedFolders.includes(folder.id));
+  const renaming = useApp((s) => s.renamingFolderId === folder.id);
+  const count = useApp(
+    (s) =>
+      s.folders.filter((f) => f.parentId === folder.id).length +
+      s.connections.filter((c) => c.folderId === folder.id).length +
+      s.sshHosts.filter((h) => h.folderId === folder.id).length,
+  );
+  const toggleFolder = useApp((s) => s.toggleFolder);
+  const renameFolder = useApp((s) => s.renameFolder);
+  const setRenamingFolder = useApp((s) => s.setRenamingFolder);
+  const createFolder = useApp((s) => s.createFolder);
+  const deleteFolder = useApp((s) => s.deleteFolder);
+  const openConnectionDialog = useApp((s) => s.openConnectionDialog);
+  const openSshDialog = useApp((s) => s.openSshDialog);
+  const isDropTarget = useTreeDrag((s) => !!s.item && s.over === folder.id);
+  const [draft, setDraft] = useState(folder.name);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  // Filtering opens every folder on the way to a match.
+  const open = !!tree.visible || !collapsed;
+
+  useEffect(() => {
+    if (renaming) setDraft(folder.name);
+  }, [renaming, folder.name]);
+
+  return (
+    <div data-drop={folder.id}>
+      <div
+        className={`group flex h-[26px] cursor-default items-center gap-1 rounded-md pr-1.5 text-[12.5px] ${
+          isDropTarget ? "bg-accent-soft ring-1 ring-accent" : "text-text/90 hover:bg-hover"
+        }`}
+        style={{ paddingLeft: 4 + depth * 14 }}
+        onClick={() => !clickSuppressed() && !renaming && toggleFolder(folder.id)}
+        onPointerDown={(e) => !renaming && startTreeDrag(e, { kind: "folder", id: folder.id, label: folder.name }, tree.onDrop)}
+        onKeyDown={(e) => e.key === "F2" && setRenamingFolder(folder.id)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          tree.openMenu(e, [
+            { label: "New folder inside", icon: <FolderPlus size={13} />, onClick: () => void createFolder(folder.id) },
+            {
+              label: "New SSH host here",
+              icon: <TerminalSquare size={13} />,
+              onClick: () => openSshDialog({ ...blankSshHost(), folderId: folder.id }),
+            },
+            {
+              label: "New PostgreSQL connection here",
+              icon: <Database size={13} />,
+              onClick: () => openConnectionDialog({ ...blankConnection(), folderId: folder.id }),
+            },
+            "separator",
+            { label: "Rename", icon: <Pencil size={13} />, hint: "F2", onClick: () => setRenamingFolder(folder.id) },
+            {
+              label: "Move to…",
+              icon: <FolderInput size={13} />,
+              onClick: () => tree.onMove({ kind: "folder", id: folder.id, label: folder.name }),
+            },
+            { label: "Delete folder…", icon: <Trash2 size={13} />, danger: true, onClick: () => setConfirmDelete(true) },
+          ]);
         }}
+        title={folder.name}
+        tabIndex={-1}
+        data-folder-row={folder.name}
       >
-        <Plus size={13} />
-      </button>
+        <span className="flex w-3.5 shrink-0 justify-center text-faint">
+          <ChevronRight size={12} className={`transition-transform ${open ? "rotate-90" : ""}`} />
+        </span>
+        <span className="flex shrink-0 items-center text-muted">
+          {open ? <FolderOpen size={14} className="text-warn" /> : <FolderClosed size={14} className="text-warn" />}
+        </span>
+        {renaming ? (
+          <input
+            autoFocus
+            className="h-5 min-w-0 flex-1 rounded border border-accent bg-bg px-1 text-[12.5px] outline-none"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onFocus={(e) => e.target.select()}
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") void renameFolder(folder.id, draft);
+              if (e.key === "Escape") setRenamingFolder(null);
+            }}
+            onBlur={() => void renameFolder(folder.id, draft)}
+            aria-label="Folder name"
+          />
+        ) : (
+          <span className="min-w-0 flex-1 truncate font-medium">{folder.name}</span>
+        )}
+        {!renaming && <span className="shrink-0 text-[11px] text-faint">{count || ""}</span>}
+      </div>
+      {open && (
+        <>
+          <FolderContents parentId={folder.id} depth={depth + 1} tree={tree} />
+          {count === 0 && !tree.visible && (
+            <div className="flex h-[24px] items-center text-[11.5px] text-faint italic" style={{ paddingLeft: 4 + (depth + 1) * 14 + 18 }}>
+              Empty: drag connections here
+            </div>
+          )}
+        </>
+      )}
+      {confirmDelete && (
+        <Modal
+          title="Delete folder"
+          width={420}
+          onClose={() => setConfirmDelete(false)}
+          footer={
+            <>
+              <button className="btn-outline" onClick={() => setConfirmDelete(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn-danger"
+                onClick={() => {
+                  setConfirmDelete(false);
+                  void deleteFolder(folder.id);
+                }}
+              >
+                Delete folder
+              </button>
+            </>
+          }
+        >
+          <div className="p-4 text-[13px]">
+            Delete the folder <b>{folder.name}</b>?{" "}
+            {count > 0 ? "Its contents aren't deleted: they move up one level." : "It's empty."}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
 
-function SshNode({ host, openMenu }: { host: SshHost; openMenu: NodeProps["openMenu"] }) {
+/** Label that follows the pointer while dragging a tree item. */
+function DragGhost() {
+  const { item, x, y } = useTreeDrag();
+  if (!item) return null;
+  return (
+    <div
+      className="pointer-events-none fixed z-[3000] rounded-md border border-border bg-panel px-2 py-1 text-[12px] shadow-lg"
+      style={{ left: x + 12, top: y + 8 }}
+    >
+      {item.label}
+    </div>
+  );
+}
+
+/** Picks a destination folder: the keyboard-friendly alternative to dragging. */
+function MoveDialog({ item, onClose }: { item: { kind: ItemKind; id: string; label: string }; onClose: () => void }) {
+  const folders = useApp((s) => s.folders);
+  const moveItems = useApp((s) => s.moveItems);
+  // A folder can't move into itself or anything inside it.
+  const blocked = useMemo(() => {
+    const out = new Set<string>();
+    if (item.kind !== "folder") return out;
+    const walk = (id: string) => {
+      out.add(id);
+      folders.filter((f) => f.parentId === id).forEach((f) => walk(f.id));
+    };
+    walk(item.id);
+    return out;
+  }, [folders, item]);
+  const rows: { id: string | null; name: string; depth: number }[] = [{ id: null, name: "Top level", depth: 0 }];
+  const add = (parent: string | null, depth: number) => {
+    for (const f of folders.filter((x) => (x.parentId ?? null) === parent && !blocked.has(x.id)).sort(byName)) {
+      rows.push({ id: f.id, name: f.name, depth });
+      add(f.id, depth + 1);
+    }
+  };
+  add(null, 1);
+  return (
+    <Modal title={`Move ${item.label}`} width={400} onClose={onClose}>
+      <div className="max-h-[50vh] overflow-auto p-2">
+        {rows.map((r) => (
+          <button
+            key={r.id ?? "__top"}
+            className="flex w-full items-center gap-2 rounded-md py-1.5 pr-2 text-left text-[12.5px] hover:bg-hover"
+            style={{ paddingLeft: 8 + r.depth * 16 }}
+            onClick={() => {
+              onClose();
+              void moveItems([{ kind: item.kind, id: item.id }], r.id);
+            }}
+          >
+            {r.id ? <FolderClosed size={14} className="text-warn" /> : <Layers size={14} className="text-muted" />}
+            {r.name}
+          </button>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
+function SshNode({
+  host,
+  depth,
+  openMenu,
+  onDrop,
+  onMove,
+}: {
+  host: SshHost;
+  depth: number;
+  openMenu: NodeProps["openMenu"];
+  onDrop: NodeProps["onDrop"];
+  onMove: NodeProps["onMove"];
+}) {
   const openTerminalTab = useApp((s) => s.openTerminalTab);
   const openSshDialog = useApp((s) => s.openSshDialog);
   const deleteSshHost = useApp((s) => s.deleteSshHost);
@@ -157,7 +440,8 @@ function SshNode({ host, openMenu }: { host: SshHost; openMenu: NodeProps["openM
   return (
     <>
       <Row
-        depth={0}
+        depth={depth}
+        onPointerDown={(e) => startTreeDrag(e, { kind: "ssh", id: host.id, label: host.name }, onDrop)}
         active={isActive}
         icon={
           <span className="relative">
@@ -170,7 +454,7 @@ function SshNode({ host, openMenu }: { host: SshHost; openMenu: NodeProps["openM
         label={<span className="font-medium">{host.name}</span>}
         right={<span className="font-mono">{host.host}</span>}
         title={`${target}\nClick to open a terminal`}
-        onClick={() => openTerminalTab(host.id)}
+        onClick={() => !clickSuppressed() && openTerminalTab(host.id)}
         onContextMenu={(e) =>
           openMenu(e, [
             { label: "Open terminal", icon: <TerminalSquare size={13} />, onClick: () => openTerminalTab(host.id) },
@@ -182,6 +466,11 @@ function SshNode({ host, openMenu }: { host: SshHost; openMenu: NodeProps["openM
               onClick: () => openSshDialog({ ...host, id: "", name: `${host.name} copy` }),
             },
             { label: "Copy ssh command", icon: <Copy size={13} />, onClick: () => void navigator.clipboard.writeText(`ssh ${host.port === 22 ? "" : `-p ${host.port} `}${host.user}@${host.host}`) },
+            {
+              label: "Move to…",
+              icon: <FolderInput size={13} />,
+              onClick: () => onMove({ kind: "ssh", id: host.id, label: host.name }),
+            },
             { label: "Delete…", icon: <Trash2 size={13} />, danger: true, onClick: () => setConfirmDelete(true) },
           ])
         }
@@ -218,10 +507,14 @@ function SshNode({ host, openMenu }: { host: SshHost; openMenu: NodeProps["openM
 }
 
 interface NodeProps {
+  /** Indent level of the connection row; its databases, schemas and tables nest below. */
+  base: number;
   expanded: Set<string>;
   toggle: (key: string, force?: boolean) => void;
   openMenu: (at: { clientX: number; clientY: number }, items: MenuEntry[]) => void;
   filter: string;
+  onDrop: (item: DragItem, folderId: string | null) => void;
+  onMove: (item: { kind: ItemKind; id: string; label: string }) => void;
 }
 
 function Row(props: {
@@ -235,6 +528,7 @@ function Row(props: {
   onClick?: () => void;
   onDoubleClick?: () => void;
   onContextMenu?: (e: React.MouseEvent) => void;
+  onPointerDown?: (e: React.PointerEvent) => void;
   title?: string;
   actions?: ReactNode;
 }) {
@@ -246,6 +540,7 @@ function Row(props: {
       style={{ paddingLeft: 4 + props.depth * 14 }}
       onClick={props.onClick}
       onDoubleClick={props.onDoubleClick}
+      onPointerDown={props.onPointerDown}
       onContextMenu={(e) => {
         if (!props.onContextMenu) return;
         e.preventDefault();
@@ -316,13 +611,19 @@ function ConnectionNode({ conn, ...p }: NodeProps & { conn: ConnectionConfig }) 
       icon: <Copy size={13} />,
       onClick: () => openConnectionDialog({ ...conn, id: "", name: `${conn.name} copy` }),
     },
+    {
+      label: "Move to…",
+      icon: <FolderInput size={13} />,
+      onClick: () => p.onMove({ kind: "connection", id: conn.id, label: conn.name }),
+    },
     { label: "Delete…", icon: <Trash2 size={13} />, danger: true, onClick: () => setConfirmDelete(true) },
   ];
 
   return (
     <div className="mt-0.5">
       <Row
-        depth={0}
+        depth={p.base}
+        onPointerDown={(e) => startTreeDrag(e, { kind: "connection", id: conn.id, label: conn.name }, p.onDrop)}
         expandable
         open={open}
         icon={
@@ -344,7 +645,7 @@ function ConnectionNode({ conn, ...p }: NodeProps & { conn: ConnectionConfig }) 
           ) : undefined
         }
         title={`${conn.user}@${conn.host}:${conn.port}/${conn.database}`}
-        onClick={() => void activate()}
+        onClick={() => !clickSuppressed() && void activate()}
         onContextMenu={(e) => p.openMenu(e, items)}
         actions={
           <button
@@ -421,7 +722,7 @@ function DatabaseNode({ conn, database, ...p }: NodeProps & { conn: ConnectionCo
   return (
     <>
       <Row
-        depth={1}
+        depth={p.base + 1}
         expandable
         open={open}
         icon={<Layers size={13} className={isDefault ? "text-accent" : ""} />}
@@ -489,7 +790,7 @@ function SchemaNode({
   return (
     <>
       <Row
-        depth={2}
+        depth={p.base + 2}
         expandable
         open={open}
         icon={<FolderTree size={13} />}
@@ -532,7 +833,7 @@ function GroupNode(
   return (
     <>
       <Row
-        depth={3}
+        depth={p.base + 3}
         expandable
         open={open}
         icon={null}
@@ -543,9 +844,9 @@ function GroupNode(
       {open &&
         items.map((item) =>
           "oid" in item ? (
-            <FunctionLeaf key={item.oid} conn={conn} database={database} fn={item} openMenu={p.openMenu} />
+            <FunctionLeaf key={item.oid} conn={conn} database={database} fn={item} openMenu={p.openMenu} depth={p.base + 4} />
           ) : (
-            <ObjectLeaf key={item.name} conn={conn} database={database} obj={item} openMenu={p.openMenu} />
+            <ObjectLeaf key={item.name} conn={conn} database={database} obj={item} openMenu={p.openMenu} depth={p.base + 4} />
           ),
         )}
     </>
@@ -557,6 +858,7 @@ function ObjectLeaf(props: {
   database: string;
   obj: meta.DbObject;
   openMenu: NodeProps["openMenu"];
+  depth: number;
 }) {
   const { conn, database, obj } = props;
   const openTableTab = useApp((s) => s.openTableTab);
@@ -570,7 +872,7 @@ function ObjectLeaf(props: {
     obj.kind === "v" ? <Eye size={13} /> : obj.kind === "m" ? <Eye size={13} className="text-accent" /> : <Table2 size={13} />;
   return (
     <Row
-      depth={4}
+      depth={props.depth}
       icon={icon}
       label={obj.name}
       active={isActive}
@@ -602,6 +904,7 @@ function FunctionLeaf(props: {
   database: string;
   fn: meta.DbFunction;
   openMenu: NodeProps["openMenu"];
+  depth: number;
 }) {
   const { conn, database, fn } = props;
   const openQueryTab = useApp((s) => s.openQueryTab);
@@ -616,7 +919,7 @@ function FunctionLeaf(props: {
   };
   return (
     <Row
-      depth={4}
+      depth={props.depth}
       icon={<FileCode2 size={13} />}
       label={
         <>

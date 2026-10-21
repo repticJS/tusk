@@ -40,6 +40,9 @@ pub struct SshConfig {
     /// Folder the shell starts in, e.g. "/home/New Webapp" or "~/apps".
     #[serde(default)]
     pub start_dir: Option<String>,
+    /// Sidebar folder; None is the top level.
+    #[serde(default)]
+    pub folder_id: Option<String>,
 }
 
 #[derive(Serialize)]

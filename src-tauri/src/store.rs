@@ -26,6 +26,29 @@ pub struct ConnectionConfig {
     /// Show pg_catalog / information_schema in the tree.
     #[serde(default)]
     pub show_system_schemas: bool,
+    /// Sidebar folder; None is the top level.
+    #[serde(default)]
+    pub folder_id: Option<String>,
+}
+
+/// A sidebar folder. Folders nest through parent_id and can hold both
+/// database connections and SSH hosts.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+}
+
+/// Something that can be moved between folders.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemRef {
+    /// connection | ssh | folder
+    pub kind: String,
+    pub id: String,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -33,6 +56,8 @@ struct StoreFile {
     connections: Vec<ConnectionConfig>,
     #[serde(default)]
     ssh_hosts: Vec<SshConfig>,
+    #[serde(default)]
+    folders: Vec<Folder>,
 }
 
 pub struct Store {
@@ -118,6 +143,94 @@ impl Store {
         self.save()?;
         secret::delete(&self.dir, &ssh_secret_key(id));
         Ok(())
+    }
+
+    // ---- folders ----
+
+    pub fn list_folders(&self) -> Vec<Folder> {
+        self.file.folders.clone()
+    }
+
+    /// True if `folder` is `ancestor` or sits somewhere inside it.
+    fn is_within(&self, folder: Option<&str>, ancestor: &str) -> bool {
+        let mut current = folder.map(str::to_string);
+        // The hop limit guards against a corrupted file with a cycle.
+        for _ in 0..=self.file.folders.len() {
+            match current {
+                None => return false,
+                Some(id) if id == ancestor => return true,
+                Some(id) => current = self.file.folders.iter().find(|f| f.id == id).and_then(|f| f.parent_id.clone()),
+            }
+        }
+        true
+    }
+
+    fn check_folder(&self, folder_id: Option<&str>) -> AppResult<()> {
+        match folder_id {
+            Some(id) if !self.file.folders.iter().any(|f| f.id == id) => Err(AppError::msg("That folder no longer exists")),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn save_folder(&mut self, folder: Folder) -> AppResult<()> {
+        if folder.name.trim().is_empty() {
+            return Err(AppError::msg("Folder name can't be empty"));
+        }
+        self.check_folder(folder.parent_id.as_deref())?;
+        if self.is_within(folder.parent_id.as_deref(), &folder.id) {
+            return Err(AppError::msg("A folder can't be moved inside itself"));
+        }
+        match self.file.folders.iter_mut().find(|f| f.id == folder.id) {
+            Some(existing) => *existing = folder,
+            None => self.file.folders.push(folder),
+        }
+        self.save()
+    }
+
+    /// Deletes a folder. Its contents (subfolders, connections, hosts) move
+    /// up to the folder's parent, so nothing else is lost.
+    pub fn delete_folder(&mut self, id: &str) -> AppResult<()> {
+        let parent = self.file.folders.iter().find(|f| f.id == id).and_then(|f| f.parent_id.clone());
+        for f in self.file.folders.iter_mut().filter(|f| f.parent_id.as_deref() == Some(id)) {
+            f.parent_id = parent.clone();
+        }
+        for c in self.file.connections.iter_mut().filter(|c| c.folder_id.as_deref() == Some(id)) {
+            c.folder_id = parent.clone();
+        }
+        for h in self.file.ssh_hosts.iter_mut().filter(|h| h.folder_id.as_deref() == Some(id)) {
+            h.folder_id = parent.clone();
+        }
+        self.file.folders.retain(|f| f.id != id);
+        self.save()
+    }
+
+    /// Moves connections, hosts and folders into `folder_id` (None = top level).
+    pub fn move_items(&mut self, items: &[ItemRef], folder_id: Option<String>) -> AppResult<()> {
+        self.check_folder(folder_id.as_deref())?;
+        for item in items {
+            match item.kind.as_str() {
+                "connection" => {
+                    if let Some(c) = self.file.connections.iter_mut().find(|c| c.id == item.id) {
+                        c.folder_id = folder_id.clone();
+                    }
+                }
+                "ssh" => {
+                    if let Some(h) = self.file.ssh_hosts.iter_mut().find(|h| h.id == item.id) {
+                        h.folder_id = folder_id.clone();
+                    }
+                }
+                "folder" => {
+                    if self.is_within(folder_id.as_deref(), &item.id) {
+                        return Err(AppError::msg("A folder can't be moved inside itself"));
+                    }
+                    if let Some(f) = self.file.folders.iter_mut().find(|f| f.id == item.id) {
+                        f.parent_id = folder_id.clone();
+                    }
+                }
+                other => return Err(AppError::msg(format!("Unknown item kind {other}"))),
+            }
+        }
+        self.save()
     }
 
     pub fn known_hosts_path(&self) -> std::path::PathBuf {
@@ -216,5 +329,70 @@ mod secret {
         if map.remove(id).is_some() {
             let _ = write(dir, &map);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> Store {
+        let dir = std::env::temp_dir().join(format!("tusk-test-{}", uuid::Uuid::new_v4()));
+        Store::load(dir)
+    }
+
+    fn folder(id: &str, parent: Option<&str>) -> Folder {
+        Folder { id: id.into(), name: id.into(), parent_id: parent.map(Into::into) }
+    }
+
+    fn conn(id: &str, folder: Option<&str>) -> ConnectionConfig {
+        ConnectionConfig {
+            id: id.into(),
+            name: id.into(),
+            host: "localhost".into(),
+            port: 5432,
+            user: "postgres".into(),
+            database: "postgres".into(),
+            ssl_mode: "prefer".into(),
+            color: None,
+            save_password: false,
+            show_system_schemas: false,
+            folder_id: folder.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn folders_cannot_contain_themselves() {
+        let mut s = store();
+        s.save_folder(folder("a", None)).unwrap();
+        s.save_folder(folder("b", Some("a"))).unwrap();
+        s.save_folder(folder("c", Some("b"))).unwrap();
+        let into_child = s.move_items(&[ItemRef { kind: "folder".into(), id: "a".into() }], Some("c".into()));
+        assert!(into_child.is_err());
+        assert!(s.save_folder(folder("a", Some("a"))).is_err());
+        // Moving to an unrelated place is fine.
+        s.move_items(&[ItemRef { kind: "folder".into(), id: "c".into() }], None).unwrap();
+        assert_eq!(s.list_folders().iter().find(|f| f.id == "c").unwrap().parent_id, None);
+    }
+
+    #[test]
+    fn deleting_a_folder_moves_its_contents_up() {
+        let mut s = store();
+        s.save_folder(folder("outer", None)).unwrap();
+        s.save_folder(folder("inner", Some("outer"))).unwrap();
+        s.save_folder(folder("deep", Some("inner"))).unwrap();
+        s.upsert(conn("db", Some("inner"))).unwrap();
+        s.delete_folder("inner").unwrap();
+        assert!(s.list_folders().iter().all(|f| f.id != "inner"));
+        assert_eq!(s.list_folders().iter().find(|f| f.id == "deep").unwrap().parent_id.as_deref(), Some("outer"));
+        assert_eq!(s.get("db").unwrap().folder_id.as_deref(), Some("outer"));
+    }
+
+    #[test]
+    fn moving_into_missing_folder_fails() {
+        let mut s = store();
+        s.upsert(conn("db", None)).unwrap();
+        let r = s.move_items(&[ItemRef { kind: "connection".into(), id: "db".into() }], Some("nope".into()));
+        assert!(r.is_err());
     }
 }

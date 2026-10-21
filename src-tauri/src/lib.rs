@@ -9,7 +9,7 @@ use ssh::{SshConfig, SshSessions};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use error::{AppError, AppResult};
 use std::sync::Mutex;
-use store::{ConnectionConfig, Store};
+use store::{ConnectionConfig, Folder, ItemRef, Store};
 use tauri::{Manager, State};
 
 struct AppState {
@@ -148,6 +148,29 @@ async fn cancel_query(state: State<'_, AppState>, session: SessionRef) -> AppRes
         Some(s) => s.cancel().await,
         None => Ok(()),
     }
+}
+
+// ---- folders ----
+
+#[tauri::command]
+fn list_folders(state: State<'_, AppState>) -> Vec<Folder> {
+    state.store.lock().unwrap().list_folders()
+}
+
+/// Creates or renames a folder (also used to move it, via parent_id).
+#[tauri::command]
+fn save_folder(state: State<'_, AppState>, folder: Folder) -> AppResult<()> {
+    state.store.lock().unwrap().save_folder(folder)
+}
+
+#[tauri::command]
+fn delete_folder(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.store.lock().unwrap().delete_folder(&id)
+}
+
+#[tauri::command]
+fn move_to_folder(state: State<'_, AppState>, items: Vec<ItemRef>, folder_id: Option<String>) -> AppResult<()> {
+    state.store.lock().unwrap().move_items(&items, folder_id)
 }
 
 // ---- SSH ----
@@ -343,6 +366,10 @@ pub fn run() {
             cancel_query,
             write_text_file,
             read_text_file,
+            list_folders,
+            save_folder,
+            delete_folder,
+            move_to_folder,
             list_ssh_hosts,
             save_ssh_host,
             delete_ssh_host,

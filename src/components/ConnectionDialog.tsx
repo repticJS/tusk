@@ -2,23 +2,9 @@ import { CheckCircle2, AlertCircle, Link2 } from "lucide-react";
 import { useState } from "react";
 import { api, type ConnectionConfig, type SslMode } from "../lib/api";
 import { useApp } from "../store";
+import { blankConnection, COLORS } from "../lib/defaults";
 import { KindSwitch } from "./SshDialogs";
 import { Field, Modal, Spinner } from "./ui";
-
-const COLORS = ["#5b8cff", "#4cc38a", "#e7b350", "#f26d6d", "#b07cff", "#3fc1c9", "#ff8a4c", "#8a92a0"];
-
-const blank = (): ConnectionConfig => ({
-  id: "",
-  name: "",
-  host: "localhost",
-  port: 5432,
-  user: "postgres",
-  database: "postgres",
-  sslMode: "prefer",
-  color: COLORS[0],
-  savePassword: true,
-  showSystemSchemas: false,
-});
 
 /** Parses postgres://user:pass@host:port/db?sslmode=require */
 function parseUrl(url: string): Partial<ConnectionConfig> & { password?: string } {
@@ -42,7 +28,7 @@ export function ConnectionDialog() {
   const connect = useApp((s) => s.connect);
   const showToast = useApp((s) => s.showToast);
 
-  const [cfg, setCfg] = useState<ConnectionConfig>(() => (editing ? { ...editing } : blank()));
+  const [cfg, setCfg] = useState<ConnectionConfig>(() => (editing ? { ...editing } : blankConnection()));
   const [password, setPassword] = useState("");
   const [passwordTouched, setPasswordTouched] = useState(false);
   const [url, setUrl] = useState("");
@@ -126,7 +112,7 @@ export function ConnectionDialog() {
           void save();
         }}
       >
-        {isNew && <KindSwitch value="postgres" />}
+        {isNew && <KindSwitch value="postgres" folderId={cfg.folderId} />}
         <div className="flex h-8 items-center gap-2 rounded-md border border-dashed border-border bg-bg px-2.5 focus-within:border-accent">
           <Link2 size={13} className="text-faint" />
           <input

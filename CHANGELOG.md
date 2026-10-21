@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3
+
+- Folders in the sidebar: group SSH hosts and PostgreSQL connections together, nest folders inside folders, and collapse them. Use the + button or right-click a folder to create one, then drag items onto it or right-click and choose "Move to…".
+- Deleting a folder keeps its contents: they move up one level.
+
 ## 0.2.2
 
 - SSH hosts can have a start folder (e.g. /home/New Webapp): the terminal and file panel open there when you connect. Set it in the host's settings, or right-click a folder in the file panel and choose "Use as start folder".

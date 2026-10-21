@@ -3,21 +3,20 @@ import { FolderOpen, ShieldAlert, ShieldQuestion } from "lucide-react";
 import { useState } from "react";
 import { sshApi, type SshAuth, type SshHost } from "../lib/api";
 import { useApp } from "../store";
+import { blankConnection, blankSshHost, COLORS } from "../lib/defaults";
 import { Field, Modal, Spinner } from "./ui";
 
-export const COLORS = ["#5b8cff", "#4cc38a", "#e7b350", "#f26d6d", "#b07cff", "#3fc1c9", "#ff8a4c", "#8a92a0"];
-
 /** PostgreSQL / SSH switch shown at the top of a new-connection dialog. */
-export function KindSwitch({ value }: { value: "postgres" | "ssh" }) {
+export function KindSwitch({ value, folderId }: { value: "postgres" | "ssh"; folderId?: string | null }) {
   const s = useApp.getState();
   const pick = (v: "postgres" | "ssh") => {
     if (v === value) return;
     if (v === "ssh") {
       s.closeConnectionDialog();
-      s.openSshDialog();
+      s.openSshDialog({ ...blankSshHost(), folderId });
     } else {
       s.closeSshDialog();
-      s.openConnectionDialog();
+      s.openConnectionDialog({ ...blankConnection(), folderId });
     }
   };
   return (
@@ -41,25 +40,13 @@ export function KindSwitch({ value }: { value: "postgres" | "ssh" }) {
   );
 }
 
-const blank = (): SshHost => ({
-  id: "",
-  name: "",
-  host: "",
-  port: 22,
-  user: "",
-  auth: "password",
-  keyPath: "",
-  color: COLORS[1],
-  saveSecret: true,
-});
-
 export function SshDialog() {
   const { editing } = useApp((s) => s.sshDialog);
   const close = useApp((s) => s.closeSshDialog);
   const loadConnections = useApp((s) => s.loadConnections);
   const openTerminalTab = useApp((s) => s.openTerminalTab);
   const showToast = useApp((s) => s.showToast);
-  const [cfg, setCfg] = useState<SshHost>(() => (editing ? { ...editing } : blank()));
+  const [cfg, setCfg] = useState<SshHost>(() => (editing ? { ...editing } : blankSshHost()));
   const [secret, setSecret] = useState("");
   const [secretTouched, setSecretTouched] = useState(false);
   const [quick, setQuick] = useState("");
@@ -137,7 +124,7 @@ export function SshDialog() {
           void save(true);
         }}
       >
-        {isNew && <KindSwitch value="ssh" />}
+        {isNew && <KindSwitch value="ssh" folderId={cfg.folderId} />}
         {isNew && (
           <input
             className="field font-mono text-[12px]"

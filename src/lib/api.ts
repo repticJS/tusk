@@ -13,7 +13,25 @@ export interface ConnectionConfig {
   color?: string | null;
   savePassword: boolean;
   showSystemSchemas: boolean;
+  /** Sidebar folder; null/undefined is the top level. */
+  folderId?: string | null;
 }
+
+export interface Folder {
+  id: string;
+  name: string;
+  parentId?: string | null;
+}
+
+export type ItemKind = "connection" | "ssh" | "folder";
+
+export const folderApi = {
+  list: () => call<Folder[]>("list_folders"),
+  save: (folder: Folder) => call<void>("save_folder", { folder }),
+  remove: (id: string) => call<void>("delete_folder", { id }),
+  move: (items: { kind: ItemKind; id: string }[], folderId: string | null) =>
+    call<void>("move_to_folder", { items, folderId }),
+};
 
 export interface SessionRef {
   connId: string;
@@ -141,6 +159,8 @@ export interface SshHost {
   saveSecret: boolean;
   /** Folder the shell starts in, e.g. "/home/New Webapp" or "~/apps". */
   startDir?: string | null;
+  /** Sidebar folder; null/undefined is the top level. */
+  folderId?: string | null;
 }
 
 export type TermEvent =

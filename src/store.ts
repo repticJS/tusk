@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { api, sshApi, type ConnectionConfig, type SessionRef, type SshHost } from "./lib/api";
+import { api, folderApi, sshApi, type ConnectionConfig, type Folder, type ItemKind, type SessionRef, type SshHost } from "./lib/api";
 import * as meta from "./lib/meta";
 
 export interface QueryTab {
@@ -98,6 +98,11 @@ interface State {
   filePanel: FilePanelPrefs;
   connections: ConnectionConfig[];
   sshHosts: SshHost[];
+  folders: Folder[];
+  /** Folder ids the user has collapsed (folders start open). */
+  collapsedFolders: string[];
+  /** A folder whose name is being edited inline in the sidebar. */
+  renamingFolderId: string | null;
   status: Record<string, ConnStatus | undefined>;
   databases: Record<string, string[] | undefined>;
   cache: Record<string, DbCache | undefined>;
@@ -130,6 +135,12 @@ interface State {
   openRemoteFile(termId: string, hostId: string, path: string): void;
   setFilePanel(patch: Partial<FilePanelPrefs>): void;
   setDirty(id: string, dirty: boolean): void;
+  createFolder(parentId: string | null): Promise<void>;
+  renameFolder(id: string, name: string): Promise<void>;
+  deleteFolder(id: string): Promise<void>;
+  moveItems(items: { kind: ItemKind; id: string }[], folderId: string | null): Promise<void>;
+  toggleFolder(id: string, open?: boolean): void;
+  setRenamingFolder(id: string | null): void;
   requestSshSecret(r: Omit<SshSecretRequest, "resolve">): Promise<{ secret: string; save: boolean } | null>;
   resolveSshSecret(r: { secret: string; save: boolean } | null): void;
   requestHostKey(r: Omit<HostKeyRequest, "resolve">): Promise<boolean>;
@@ -186,6 +197,9 @@ export const useApp = create<State>()(
       filePanel: { open: true, follow: true, showHidden: false },
       connections: [],
       sshHosts: [],
+      folders: [],
+      collapsedFolders: [],
+      renamingFolderId: null,
       status: {},
       databases: {},
       cache: {},
@@ -211,14 +225,18 @@ export const useApp = create<State>()(
       setRowLimit: (rowLimit) => set({ rowLimit }),
 
       async loadConnections() {
-        const [connections, sshHosts] = await Promise.all([api.listConnections(), sshApi.list()]);
+        const [connections, sshHosts, folders] = await Promise.all([
+          api.listConnections(),
+          sshApi.list(),
+          folderApi.list(),
+        ]);
         // Drop tabs whose connection or host no longer exists.
         const ids = new Set([...connections.map((c) => c.id), ...sshHosts.map((h) => h.id)]);
         const tabs = get().tabs.filter((t) => ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId));
         const activeTabId = tabs.some((t) => t.id === get().activeTabId)
           ? get().activeTabId
           : (tabs[0]?.id ?? null);
-        set({ connections, sshHosts, tabs, activeTabId });
+        set({ connections, sshHosts, folders, tabs, activeTabId });
       },
 
       openConnectionDialog: (editing) => set({ connectionDialog: { open: true, editing } }),
@@ -256,6 +274,63 @@ export const useApp = create<State>()(
       },
 
       setFilePanel: (patch) => set((s) => ({ filePanel: { ...s.filePanel, ...patch } })),
+      async createFolder(parentId) {
+        const id = crypto.randomUUID();
+        try {
+          await folderApi.save({ id, name: "New folder", parentId });
+          if (parentId) get().toggleFolder(parentId, true);
+          await get().loadConnections();
+          set({ renamingFolderId: id });
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+        }
+      },
+
+      async renameFolder(id, name) {
+        const folder = get().folders.find((f) => f.id === id);
+        set({ renamingFolderId: null });
+        if (!folder || !name.trim() || name.trim() === folder.name) return;
+        try {
+          await folderApi.save({ ...folder, name: name.trim() });
+          await get().loadConnections();
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+        }
+      },
+
+      async deleteFolder(id) {
+        try {
+          await folderApi.remove(id);
+          set((s) => ({ collapsedFolders: s.collapsedFolders.filter((f) => f !== id) }));
+          await get().loadConnections();
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+        }
+      },
+
+      async moveItems(items, folderId) {
+        try {
+          await folderApi.move(items, folderId);
+          if (folderId) get().toggleFolder(folderId, true);
+          await get().loadConnections();
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+        }
+      },
+
+      toggleFolder(id, open) {
+        set((s) => {
+          const isOpen = !s.collapsedFolders.includes(id);
+          const want = open ?? !isOpen;
+          if (want === isOpen) return {};
+          return {
+            collapsedFolders: want ? s.collapsedFolders.filter((f) => f !== id) : [...s.collapsedFolders, id],
+          };
+        });
+      },
+
+      setRenamingFolder: (renamingFolderId) => set({ renamingFolderId }),
+
       setDirty: (id, dirty) => {
         if (!!get().dirty[id] !== dirty) set((s) => ({ dirty: { ...s.dirty, [id]: dirty } }));
       },
@@ -464,6 +539,7 @@ export const useApp = create<State>()(
         theme: s.theme,
         rowLimit: s.rowLimit,
         filePanel: s.filePanel,
+        collapsedFolders: s.collapsedFolders,
         // SSH sessions don't survive a restart, so their tabs aren't restored.
         tabs: s.tabs.filter((t) => isDbTab(t)),
         activeTabId: isDbTab(s.tabs.find((t) => t.id === s.activeTabId)) ? s.activeTabId : null,
