@@ -1,4 +1,19 @@
-import { Database, FileCode2, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, X } from "lucide-react";
+import {
+  Database,
+  FileCode2,
+  LayoutGrid,
+  Monitor,
+  Moon,
+  Plus,
+  Radio,
+  Search,
+  SquareTerminal,
+  Sun,
+  Table2,
+  TerminalSquare,
+  Waypoints,
+  X,
+} from "lucide-react";
 import { useEffect } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useShallow } from "zustand/react/shallow";
@@ -14,13 +29,14 @@ import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
 import { UpdateChip, UpdateDialog, useUpdateChecks } from "./components/Updater";
 import { Modal, useMenu } from "./components/ui";
 import { setPasswordPrompter, setSshPrompter } from "./lib/api";
-import { activeConnectionOf, useApp, type Tab } from "./store";
+import { activeConnectionOf, isTermTab, useApp, type Tab } from "./store";
 
 /** Ctrl+T / "+": another terminal to the same host, or a query tab on the active database. */
 function newTabLikeActive() {
   const s = useApp.getState();
   const tab = s.tabs.find((t) => t.id === s.activeTabId);
   if (tab?.kind === "terminal") return s.openTerminalTab(tab.hostId);
+  if (tab?.kind === "local") return s.openLocalTerminal(tab.shellId);
   const a = activeConnectionOf(s);
   if (a) s.openQueryTab(a.connId, a.database);
   else s.openConnectionDialog();
@@ -35,6 +51,13 @@ export default function App() {
   const tunnelDialog = useApp((s) => s.tunnelDialog);
   const paletteOpen = useApp((s) => s.paletteOpen);
   const historyOpen = useApp((s) => s.historyOpen);
+  const multiExec = useApp((s) => s.multiExec);
+  const setActiveTab = useApp((s) => s.setActiveTab);
+  // Tiled multi-exec: its terminals share the tab area in a grid.
+  const tiles = multiExec.on && multiExec.tiled ? tabs.filter((t) => multiExec.targets.includes(t.id)) : [];
+  const tiled = tiles.length > 0;
+  const cols = Math.ceil(Math.sqrt(tiles.length));
+  const rows = Math.ceil(tiles.length / Math.max(cols, 1));
 
   useEffect(() => {
     setPasswordPrompter((connId, failed) => useApp.getState().requestPassword(connId, failed));
@@ -43,6 +66,7 @@ export default function App() {
       .getState()
       .loadConnections()
       .then(() => useApp.getState().startAutoTunnels());
+    void useApp.getState().loadShells();
   }, []);
 
   // Global shortcuts.
@@ -103,24 +127,48 @@ export default function App() {
         <Panel minSize="300px">
           <div className="flex h-full flex-col">
             <TabBar />
+            {multiExec.on && <MultiExecBar />}
             <div className="relative min-h-0 flex-1">
               {tabs.length === 0 && <Welcome />}
-              {tabs.map((t) => (
+              {tabs.map((t) => {
+                const tile = tiles.indexOf(t);
                 // Tabs stay mounted so results and scroll position survive switching.
-                <div key={t.id} className="absolute inset-0" style={{ display: t.id === activeTabId ? "block" : "none" }}>
+                const style: React.CSSProperties = tiled
+                  ? tile < 0
+                    ? { display: "none" }
+                    : {
+                        left: `${((tile % cols) / cols) * 100}%`,
+                        top: `${(Math.floor(tile / cols) / rows) * 100}%`,
+                        width: `${100 / cols}%`,
+                        height: `${100 / rows}%`,
+                      }
+                  : { display: t.id === activeTabId ? "block" : "none" };
+                return (
+                <div
+                  key={t.id}
+                  className={tiled ? "absolute p-px" : "absolute inset-0"}
+                  style={style}
+                  data-tile={tiled && tile >= 0 ? t.title : undefined}
+                  onMouseDownCapture={tiled && t.id !== activeTabId ? () => setActiveTab(t.id) : undefined}
+                >
+                  <div
+                    className={`h-full ${tiled ? `overflow-hidden rounded-sm border ${t.id === activeTabId ? "border-warn" : "border-border"}` : ""}`}
+                  >
                   {t.kind === "query" ? (
                     <QueryTab tab={t} active={t.id === activeTabId} />
                   ) : t.kind === "table" ? (
                     <TableTab tab={t} active={t.id === activeTabId} />
-                  ) : t.kind === "terminal" ? (
-                    <TerminalTab tab={t} active={t.id === activeTabId} />
+                  ) : isTermTab(t) ? (
+                    <TerminalTab tab={t} active={t.id === activeTabId} tiled={tiled} />
                   ) : t.kind === "tunnels" ? (
                     <TunnelsTab tab={t} active={t.id === activeTabId} />
                   ) : (
                     <RemoteFileTab tab={t} active={t.id === activeTabId} />
                   )}
+                  </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </Panel>
@@ -150,6 +198,7 @@ function TabBar() {
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
   const dirty = useApp((s) => s.dirty);
+  const multiExec = useApp((s) => s.multiExec);
   const [menu, openMenu] = useMenu();
 
   const closeOthers = (keep: Tab) => closeTabs(tabs.filter((t) => t.id !== keep.id).map((t) => t.id));
@@ -159,7 +208,7 @@ function TabBar() {
       <div className="flex min-w-0 flex-1 items-end overflow-x-auto [scrollbar-width:none]">
         {tabs.map((t) => {
           const conn =
-            t.kind === "tunnels"
+            t.kind === "tunnels" || t.kind === "local"
               ? undefined
               : t.kind === "terminal" || t.kind === "remote"
                 ? sshHosts.find((h) => h.id === t.hostId)
@@ -188,6 +237,8 @@ function TabBar() {
               title={
                 t.kind === "tunnels"
                   ? "SSH tunnels"
+                  : t.kind === "local"
+                    ? `Local terminal: ${t.title}`
                   : t.kind === "terminal"
                     ? `SSH: ${conn?.name ?? ""}`
                     : t.kind === "remote"
@@ -209,11 +260,16 @@ function TabBar() {
                   <TerminalSquare size={13} />
                 ) : t.kind === "tunnels" ? (
                   <Waypoints size={13} />
+                ) : t.kind === "local" ? (
+                  <Monitor size={13} />
                 ) : (
                   <FileCode2 size={13} />
                 )}
               </span>
               <span className="min-w-0 flex-1 truncate">{t.title}</span>
+              {multiExec.on && multiExec.targets.includes(t.id) && (
+                <Radio size={11} className="shrink-0 text-warn" aria-label="In multi-exec" />
+              )}
               {dirty[t.id] && <span className="h-2 w-2 shrink-0 rounded-full bg-warn" title="Unsaved changes" />}
               <button
                 className={`shrink-0 rounded p-0.5 hover:bg-hover ${active ? "text-muted" : "opacity-0 group-hover:opacity-100"}`}
@@ -235,6 +291,48 @@ function TabBar() {
         <Plus size={15} />
       </button>
       {menu}
+    </div>
+  );
+}
+
+/** Which terminals multi-exec types into, and the tiled view switch. */
+function MultiExecBar() {
+  const tabs = useApp((s) => s.tabs);
+  const multiExec = useApp((s) => s.multiExec);
+  const { toggleMultiExecTarget, setMultiExec, toggleMultiExec } = useApp.getState();
+  const terms = tabs.filter(isTermTab);
+  return (
+    <div className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-warn/40 bg-warn-soft px-3 py-1 text-[12px]">
+      <span className="flex items-center gap-1.5 font-medium text-warn">
+        <Radio size={13} /> Multi-exec
+      </span>
+      <span className="text-muted">Typing goes to:</span>
+      {terms.map((t) => (
+        <label key={t.id} className="flex items-center gap-1 rounded border border-border bg-panel px-1.5 py-0.5">
+          <input type="checkbox" checked={multiExec.targets.includes(t.id)} onChange={() => toggleMultiExecTarget(t.id)} />
+          {t.kind === "local" ? <Monitor size={11} className="text-muted" /> : <TerminalSquare size={11} className="text-muted" />}
+          {t.title}
+        </label>
+      ))}
+      {terms.length === 0 && <span className="text-faint">no terminals open</span>}
+      <div className="flex-1" />
+      <button
+        className={`btn-ghost h-6 px-1.5 ${multiExec.tiled ? "text-text" : ""}`}
+        title={multiExec.tiled ? "Show one terminal at a time" : "Show these terminals side by side"}
+        onClick={() => {
+          setMultiExec({ tiled: !multiExec.tiled });
+          // Keep the focused terminal among the visible tiles.
+          const s = useApp.getState();
+          if (!multiExec.tiled && !s.multiExec.targets.includes(s.activeTabId ?? "") && s.multiExec.targets[0]) {
+            s.setActiveTab(s.multiExec.targets[0]);
+          }
+        }}
+      >
+        <LayoutGrid size={13} /> {multiExec.tiled ? "Untile" : "Tile"}
+      </button>
+      <button className="btn-outline h-6" onClick={toggleMultiExec}>
+        Stop
+      </button>
     </div>
   );
 }
@@ -275,6 +373,8 @@ function Welcome() {
   const connect = useApp((s) => s.connect);
   const openConnectionDialog = useApp((s) => s.openConnectionDialog);
   const openQueryTab = useApp((s) => s.openQueryTab);
+  const shells = useApp((s) => s.shells);
+  const openLocalTerminal = useApp((s) => s.openLocalTerminal);
   const shortcuts: [string, string][] = [
     ["Ctrl+P", "Jump to table / command"],
     ["Ctrl+T", "New query tab"],
@@ -336,6 +436,18 @@ function Welcome() {
             <Plus size={15} /> New connection
           </button>
         </div>
+        {shells.length > 0 && (
+          <>
+            <div className="mb-2 text-[11.5px] font-semibold tracking-wide text-faint uppercase">Local terminals</div>
+            <div className="mb-8 flex flex-wrap gap-2">
+              {shells.map((sh) => (
+                <button key={sh.id} className="btn-outline h-8" onClick={() => openLocalTerminal(sh.id)}>
+                  <Monitor size={13} className="text-muted" /> {sh.name}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
         <div className="mb-2 text-[11.5px] font-semibold tracking-wide text-faint uppercase">Shortcuts</div>
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-[12.5px]">
           {shortcuts.map(([k, label]) => (
@@ -358,7 +470,13 @@ function StatusBar() {
     useShallow((s) => {
       const t = s.tabs.find((x) => x.id === s.activeTabId);
       const h = t?.kind === "terminal" || t?.kind === "remote" ? s.sshHosts.find((x) => x.id === t.hostId) : undefined;
-      return { name: h?.name, color: h?.color, target: h ? `${h.user}@${h.host}${h.port === 22 ? "" : `:${h.port}`}` : "" };
+      if (t?.kind === "local") return { name: t.title, color: undefined, target: "", local: true };
+      return {
+        name: h?.name,
+        color: h?.color,
+        target: h ? `${h.user}@${h.host}${h.port === 22 ? "" : `:${h.port}`}` : "",
+        local: false,
+      };
     }),
   );
   const active = useApp(
@@ -374,8 +492,8 @@ function StatusBar() {
       {ssh.name ? (
         <span className="flex items-center gap-1.5">
           <span className="h-2 w-2 rounded-full" style={{ background: ssh.color ?? "var(--ok)" }} />
-          SSH · {ssh.name}
-          <span className="text-faint">· {ssh.target}</span>
+          {ssh.local ? "Local" : "SSH"} · {ssh.name}
+          {ssh.target && <span className="text-faint">· {ssh.target}</span>}
         </span>
       ) : active.name ? (
         <span className="flex items-center gap-1.5">

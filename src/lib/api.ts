@@ -233,6 +233,41 @@ export const sshApi = {
   close: (termId: string) => call<void>("ssh_close", { termId }),
 };
 
+// ---- local terminals ----
+
+export interface Shell {
+  id: string;
+  name: string;
+  program: string;
+  args: string[];
+  kind: "powershell" | "cmd" | "bash" | "wsl" | "other";
+}
+
+/** Same calling convention as sshApi, for shells on this PC. */
+export const localApi = {
+  listShells: () => call<Shell[]>("list_shells"),
+  open(
+    termId: string,
+    shellId: string,
+    cols: number,
+    rows: number,
+    onData: (bytes: Uint8Array) => void,
+    onEvent: (e: TermEvent) => void,
+  ) {
+    const events = new Channel<ArrayBuffer | TermEvent>();
+    events.onmessage = (m) => {
+      if (m instanceof ArrayBuffer) onData(new Uint8Array(m));
+      else if (ArrayBuffer.isView(m)) onData(new Uint8Array(m.buffer, m.byteOffset, m.byteLength));
+      else if (Array.isArray(m)) onData(new Uint8Array(m as number[]));
+      else onEvent(m);
+    };
+    return call<void>("local_open", { termId, shellId, cols, rows, events });
+  },
+  write: (termId: string, data: string) => call<void>("local_write", { termId, data }),
+  resize: (termId: string, cols: number, rows: number) => call<void>("local_resize", { termId, cols, rows }),
+  close: (termId: string) => call<void>("local_close", { termId }),
+};
+
 // ---- tunnels ----
 
 export type TunnelKind = "local" | "remote" | "dynamic";

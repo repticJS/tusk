@@ -3,6 +3,7 @@ import { persist } from "zustand/middleware";
 import {
   api,
   folderApi,
+  localApi,
   sshApi,
   tunnelApi,
   withSshPrompts,
@@ -11,6 +12,7 @@ import {
   type Folder,
   type ItemKind,
   type SessionRef,
+  type Shell,
   type SshHost,
   type TunnelConfig,
   type TunnelStatus,
@@ -45,6 +47,14 @@ export interface TerminalTab {
   hostId: string;
 }
 
+/** A shell on this PC (PowerShell, cmd, WSL…). */
+export interface LocalTab {
+  id: string;
+  kind: "local";
+  title: string;
+  shellId: string;
+}
+
 /** A remote file opened for editing over a terminal's SFTP connection. */
 export interface RemoteFileTab {
   id: string;
@@ -64,7 +74,19 @@ export interface TunnelsTab {
 
 /** Tabs bound to a database connection. */
 export type DbTab = QueryTab | TableTab;
-export type Tab = DbTab | TerminalTab | RemoteFileTab | TunnelsTab;
+export type Tab = DbTab | TerminalTab | LocalTab | RemoteFileTab | TunnelsTab;
+
+/** Tabs with a terminal in them. */
+export const isTermTab = (t: Tab | undefined): t is TerminalTab | LocalTab =>
+  !!t && (t.kind === "terminal" || t.kind === "local");
+
+export interface MultiExec {
+  /** Typing in one target terminal goes to all of them. */
+  on: boolean;
+  targets: string[];
+  /** Show the targets side by side. */
+  tiled: boolean;
+}
 
 export const isDbTab = (t: Tab | undefined): t is DbTab => !!t && (t.kind === "query" || t.kind === "table");
 
@@ -140,6 +162,8 @@ interface State {
   /** Tunnels being started, and why the last start failed. */
   tunnelBusy: Record<string, boolean | undefined>;
   tunnelErrors: Record<string, string | undefined>;
+  shells: Shell[];
+  multiExec: MultiExec;
 
   connectionDialog: { open: boolean; editing?: ConnectionConfig };
   sshDialog: { open: boolean; editing?: SshHost };
@@ -185,6 +209,13 @@ interface State {
   openTunnelDialog(editing?: Partial<TunnelConfig>): void;
   closeTunnelDialog(): void;
   openTunnelsTab(): void;
+  loadShells(): Promise<void>;
+  /** Opens a local terminal; the first detected shell when none is given. */
+  openLocalTerminal(shellId?: string): void;
+  setMultiExec(patch: Partial<MultiExec>): void;
+  /** Turns multi-exec on (for every open terminal) or off. */
+  toggleMultiExec(): void;
+  toggleMultiExecTarget(id: string): void;
   connect(connId: string): Promise<boolean>;
   disconnect(connId: string): Promise<void>;
   deleteConnection(connId: string): Promise<void>;
@@ -252,6 +283,8 @@ export const useApp = create<State>()(
       tunnelStatus: {},
       tunnelBusy: {},
       tunnelErrors: {},
+      shells: [],
+      multiExec: { on: false, targets: [], tiled: false },
       connectionDialog: { open: false },
       sshDialog: { open: false },
       tunnelDialog: { open: false },
@@ -279,7 +312,10 @@ export const useApp = create<State>()(
         // Drop tabs whose connection or host no longer exists.
         const ids = new Set([...connections.map((c) => c.id), ...sshHosts.map((h) => h.id)]);
         const tabs = get().tabs.filter(
-          (t) => t.kind === "tunnels" || ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId),
+          (t) =>
+            t.kind === "tunnels" ||
+            t.kind === "local" ||
+            ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId),
         );
         const activeTabId = tabs.some((t) => t.id === get().activeTabId)
           ? get().activeTabId
@@ -316,7 +352,11 @@ export const useApp = create<State>()(
         const same = get().tabs.filter((t) => t.kind === "terminal" && t.hostId === hostId).length;
         const id = uid();
         const tab: TerminalTab = { id, kind: "terminal", hostId, title: same ? `${host.name} (${same + 1})` : host.name };
-        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: id }));
+        set((s) => ({
+          tabs: [...s.tabs, tab],
+          activeTabId: id,
+          multiExec: s.multiExec.on ? { ...s.multiExec, targets: [...s.multiExec.targets, id] } : s.multiExec,
+        }));
       },
 
       openRemoteFile(termId, hostId, path) {
@@ -507,6 +547,44 @@ export const useApp = create<State>()(
         set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
       },
 
+      async loadShells() {
+        try {
+          set({ shells: await localApi.listShells() });
+        } catch {
+          // No local terminals then.
+        }
+      },
+
+      openLocalTerminal(shellId) {
+        const shell = get().shells.find((x) => x.id === shellId) ?? get().shells[0];
+        if (!shell) return get().showToast("No shells found on this PC", "error");
+        const same = get().tabs.filter((t) => t.kind === "local" && t.shellId === shell.id).length;
+        const tab: LocalTab = { id: uid(), kind: "local", shellId: shell.id, title: same ? `${shell.name} (${same + 1})` : shell.name };
+        set((s) => ({
+          tabs: [...s.tabs, tab],
+          activeTabId: tab.id,
+          // A terminal opened during multi-exec joins in.
+          multiExec: s.multiExec.on ? { ...s.multiExec, targets: [...s.multiExec.targets, tab.id] } : s.multiExec,
+        }));
+      },
+
+      setMultiExec: (patch) => set((s) => ({ multiExec: { ...s.multiExec, ...patch } })),
+
+      toggleMultiExec() {
+        const me = get().multiExec;
+        if (me.on) return set({ multiExec: { ...me, on: false } });
+        set({ multiExec: { on: true, tiled: me.tiled, targets: get().tabs.filter(isTermTab).map((t) => t.id) } });
+      },
+
+      toggleMultiExecTarget(id) {
+        set((s) => {
+          const targets = s.multiExec.targets.includes(id)
+            ? s.multiExec.targets.filter((t) => t !== id)
+            : [...s.multiExec.targets, id];
+          return { multiExec: { ...s.multiExec, targets } };
+        });
+      },
+
       async connect(connId) {
         const conn = get().connections.find((c) => c.id === connId);
         if (!conn) return false;
@@ -632,13 +710,21 @@ export const useApp = create<State>()(
         const tab = get().tabs.find((t) => t.id === id);
         if (tab?.kind === "query") void api.closeSession(tabSession(tab)).catch(() => {});
         if (tab?.kind === "terminal") void sshApi.close(tab.id).catch(() => {});
+        if (tab?.kind === "local") void localApi.close(tab.id).catch(() => {});
         set((s) => {
           const idx = s.tabs.findIndex((t) => t.id === id);
           const tabs = s.tabs.filter((t) => t.id !== id);
           let activeTabId = s.activeTabId;
           if (activeTabId === id) activeTabId = tabs[Math.min(idx, tabs.length - 1)]?.id ?? null;
           const { [id]: _, ...dirty } = s.dirty;
-          return { tabs, activeTabId, dirty, pendingCloseTab: s.pendingCloseTab === id ? null : s.pendingCloseTab };
+          const targets = s.multiExec.targets.filter((t) => t !== id);
+          return {
+            tabs,
+            activeTabId,
+            dirty,
+            pendingCloseTab: s.pendingCloseTab === id ? null : s.pendingCloseTab,
+            multiExec: { ...s.multiExec, targets, on: s.multiExec.on && targets.length > 0 },
+          };
         });
       },
 

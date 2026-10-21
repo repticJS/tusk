@@ -1,8 +1,8 @@
-import { ArrowUpCircle, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints } from "lucide-react";
+import { ArrowUpCircle, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radio } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { formatDuration } from "../lib/sql";
-import { activeConnectionOf, cacheKey, useApp } from "../store";
+import { activeConnectionOf, cacheKey, isTermTab, useApp } from "../store";
 import { Modal } from "./ui";
 import { useUpdater } from "./Updater";
 
@@ -60,6 +60,22 @@ export function CommandPalette() {
       detail: useUpdater.getState().version ? `v${useUpdater.getState().version}` : undefined,
       run: () => void useUpdater.getState().checkNow(true),
     });
+    for (const sh of state.shells) {
+      out.push({
+        id: `local-${sh.id}`,
+        icon: <Monitor size={14} />,
+        label: `Local terminal: ${sh.name}`,
+        run: () => state.openLocalTerminal(sh.id),
+      });
+    }
+    if (state.tabs.some(isTermTab)) {
+      out.push({
+        id: "multi-exec",
+        icon: <Radio size={14} />,
+        label: state.multiExec.on ? "Stop multi-exec" : "Multi-exec: type into all terminals",
+        run: () => state.toggleMultiExec(),
+      });
+    }
     for (const h of state.sshHosts) {
       out.push({
         id: `ssh-${h.id}`,
@@ -88,7 +104,18 @@ export function CommandPalette() {
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.connections, state.sshHosts, state.status, state.databases, state.cache, state.theme, state.activeTabId]);
+  }, [
+    state.connections,
+    state.sshHosts,
+    state.status,
+    state.databases,
+    state.cache,
+    state.theme,
+    state.activeTabId,
+    state.shells,
+    state.tabs,
+    state.multiExec,
+  ]);
 
   const filtered = useMemo(() => {
     const query = q.trim().toLowerCase();

@@ -7,11 +7,12 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { ChevronDown, ChevronUp, FolderTree, RotateCw, Search, X } from "lucide-react";
+import { ChevronDown, ChevronUp, FolderTree, Radio, RotateCw, Search, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { DbError, sshApi } from "../lib/api";
-import { useApp, type TerminalTab as TerminalTabT } from "../store";
+import { DbError, localApi, sshApi } from "../lib/api";
+import { broadcast, registerTerminal } from "../lib/multiexec";
+import { useApp, type LocalTab, type TerminalTab as TerminalTabT } from "../store";
 import { SftpPanel } from "./SftpPanel";
 import { Spinner } from "./ui";
 
@@ -69,8 +70,14 @@ const ANSI_DIM = "\x1b[2m";
 const ANSI_RED = "\x1b[31m";
 const ANSI_RESET = "\x1b[0m";
 
-export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolean }) {
-  const host = useApp((s) => s.sshHosts.find((h) => h.id === tab.hostId));
+/** A terminal tab: an SSH shell, or a shell on this PC (`kind: "local"`). */
+export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT | LocalTab; active: boolean; tiled?: boolean }) {
+  const isLocal = tab.kind === "local";
+  const io = isLocal ? localApi : sshApi;
+  const host = useApp((s) => (tab.kind === "terminal" ? s.sshHosts.find((h) => h.id === tab.hostId) : undefined));
+  const shell = useApp((s) => (tab.kind === "local" ? s.shells.find((x) => x.id === tab.shellId) : undefined));
+  const inMultiExec = useApp((s) => s.multiExec.on && s.multiExec.targets.includes(tab.id));
+  const multiExecOn = useApp((s) => s.multiExec.on);
   const theme = useApp((s) => s.theme);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -80,7 +87,9 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
   const [state, setStateRaw] = useState<ConnState>("connecting");
   const [searchOpen, setSearchOpen] = useState(false);
   const [followSignal, setFollowSignal] = useState(0);
-  const filesOpen = useApp((s) => s.filePanel.open);
+  const exitStatus = useRef<number | null>(null);
+  // Files (SFTP) are for SSH terminals, and hidden in the tiled view.
+  const filesOpen = useApp((s) => s.filePanel.open) && !isLocal && !tiled;
   const setFilePanel = useApp((s) => s.setFilePanel);
   const [query, setQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -90,8 +99,40 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
     setStateRaw(s);
   };
 
+  const startLocal = useCallback(async (): Promise<void> => {
+    const term = termRef.current;
+    if (!term || tab.kind !== "local") return;
+    setState("connecting");
+    exitStatus.current = null;
+    try {
+      await localApi.open(
+        tab.id,
+        tab.shellId,
+        term.cols,
+        term.rows,
+        (bytes) => term.write(bytes),
+        (e) => {
+          if (e.type === "connected") setState("connected");
+          else if (e.type === "exit") exitStatus.current = e.status;
+          else if (e.type === "closed") {
+            setState("closed");
+            const code = exitStatus.current;
+            term.write(
+              `\r\n${ANSI_DIM}── Process exited${code ? ` with code ${code}` : ""}. Press Enter or R to restart ──${ANSI_RESET}\r\n`,
+            );
+          }
+        },
+      );
+    } catch (err) {
+      setState("closed");
+      term.write(`${ANSI_RED}${err instanceof Error ? err.message : String(err)}${ANSI_RESET}\r\n`);
+      term.write(`${ANSI_DIM}Press Enter or R to try again.${ANSI_RESET}\r\n`);
+    }
+  }, [tab]);
+
   const connect = useCallback(
     async (acceptFingerprint: string | null = null): Promise<void> => {
+      if (tab.kind === "local") return startLocal();
       const term = termRef.current;
       const h = useApp.getState().sshHosts.find((x) => x.id === tab.hostId);
       if (!term || !h) return;
@@ -148,7 +189,7 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
         term.write(`${ANSI_DIM}Press Enter or R to try again.${ANSI_RESET}\r\n`);
       }
     },
-    [tab.id, tab.hostId],
+    [tab, startLocal],
   );
 
   // Create the terminal once.
@@ -222,7 +263,7 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
       const chunk = pending;
       pending = "";
       try {
-        await sshApi.write(tab.id, chunk);
+        await io.write(tab.id, chunk);
       } catch {
         // The connection dropped; the closed event reports it.
       } finally {
@@ -231,12 +272,19 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
       }
     };
 
+    const send = (data: string) => {
+      if (stateRef.current !== "connected") return;
+      pending += data;
+      void flush();
+      // A command was probably run; let the file panel check the shell's folder.
+      if (data.includes("\r")) setFollowSignal((n) => n + 1);
+    };
+    const unregister = registerTerminal(tab.id, send);
+
     term.onData((data) => {
       if (stateRef.current === "connected") {
-        pending += data;
-        void flush();
-        // A command was probably run; let the file panel check the shell's folder.
-        if (data.includes("\r")) setFollowSignal((n) => n + 1);
+        send(data);
+        broadcast(tab.id, data);
       } else if (stateRef.current === "closed" && (data === "\r" || data.toLowerCase() === "r")) {
         void connect();
       }
@@ -253,7 +301,7 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
         fit.fit();
         clearTimeout(timer);
         timer = setTimeout(() => {
-          if (stateRef.current === "connected") void sshApi.resize(tab.id, term.cols, term.rows);
+          if (stateRef.current === "connected") void io.resize(tab.id, term.cols, term.rows);
         }, 60);
       });
     });
@@ -266,7 +314,8 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
       ro.disconnect();
       cancelAnimationFrame(frame);
       clearTimeout(timer);
-      void sshApi.close(tab.id).catch(() => {});
+      unregister();
+      void io.close(tab.id).catch(() => {});
       term.dispose();
       termRef.current = null;
     };
@@ -311,7 +360,11 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
     else searchRef.current?.findPrevious(query, opts);
   };
 
-  const target = host ? `${host.user}@${host.host}${host.port === 22 ? "" : `:${host.port}`}` : "";
+  const target = isLocal
+    ? "on this PC"
+    : host
+      ? `${host.user}@${host.host}${host.port === 22 ? "" : `:${host.port}`}`
+      : "";
 
   return (
     <div
@@ -323,22 +376,36 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
         <span
           className={`h-2 w-2 rounded-full ${state === "connected" ? "bg-ok" : state === "connecting" ? "bg-warn" : "bg-faint"}`}
         />
-        <span className="font-medium">{host?.name}</span>
-        <span className="text-faint">{target}</span>
+        <span className="truncate font-medium">{isLocal ? (shell?.name ?? tab.title) : host?.name}</span>
+        <span className="truncate text-faint">{target}</span>
         {state === "connecting" && <Spinner size={11} />}
         <div className="flex-1" />
+        {inMultiExec && (
+          <span className="flex shrink-0 items-center gap-1 rounded bg-warn-soft px-1.5 py-px text-[11px] font-medium text-warn">
+            <Radio size={11} /> Multi-exec
+          </span>
+        )}
         {state === "closed" && (
           <button className="btn-outline h-6" onClick={() => void connect()}>
-            <RotateCw size={12} /> Reconnect
+            <RotateCw size={12} /> {isLocal ? "Restart" : "Reconnect"}
           </button>
         )}
         <button
-          className={`btn-ghost h-6 px-1.5 ${filesOpen ? "text-accent" : ""}`}
-          title={filesOpen ? "Hide files" : "Show files (SFTP)"}
-          onClick={() => setFilePanel({ open: !filesOpen })}
+          className={`btn-ghost h-6 px-1.5 ${multiExecOn ? "text-warn" : ""}`}
+          title={multiExecOn ? "Stop multi-exec" : "Multi-exec: type into several terminals at once"}
+          onClick={() => useApp.getState().toggleMultiExec()}
         >
-          <FolderTree size={13} /> Files
+          <Radio size={13} />
         </button>
+        {!isLocal && !tiled && (
+          <button
+            className={`btn-ghost h-6 px-1.5 ${filesOpen ? "text-accent" : ""}`}
+            title={filesOpen ? "Hide files" : "Show files (SFTP)"}
+            onClick={() => setFilePanel({ open: !filesOpen })}
+          >
+            <FolderTree size={13} /> Files
+          </button>
+        )}
         <button
           className="btn-ghost h-6 px-1.5"
           title="Find (Ctrl+Shift+F)"
@@ -356,7 +423,7 @@ export function TerminalTab({ tab, active }: { tab: TerminalTabT; active: boolea
             <Panel defaultSize="300px" minSize="200px" maxSize="60%">
               <SftpPanel
                 termId={tab.id}
-                hostId={tab.hostId}
+                hostId={tab.kind === "terminal" ? tab.hostId : ""}
                 connected={state === "connected"}
                 followSignal={followSignal}
                 visible={active}

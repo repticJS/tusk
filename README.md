@@ -1,6 +1,6 @@
 # Tusk
 
-A fast, modern desktop client for PostgreSQL, with built-in SSH terminals, SFTP and SSH tunnels. Built with Tauri 2 (Rust) and React.
+A fast, modern desktop client for PostgreSQL, with built-in SSH terminals, SFTP, SSH tunnels and local terminals. Built with Tauri 2 (Rust) and React.
 
 - **Small and quick.** Native Rust backend, about a 10 MB install, opens instantly.
 - **Data grid that scales.** Canvas-rendered, loads rows as you scroll, handles 100k+ row results smoothly.
@@ -33,6 +33,12 @@ Works with PostgreSQL 9.6 and newer (tested against 9.6, 10, 11 and 16).
 | Host keys | Fingerprint confirmation on first connect, remembered afterwards; a clear warning if a server's key changes. Keys already in `~/.ssh/known_hosts` are trusted. |
 | Terminal | xterm.js with GPU rendering, 256 colors and Unicode, clickable links, find (Ctrl+Shift+F), resize follows the window, press Enter to reconnect |
 | Clipboard | Ctrl+C copies a selection (otherwise sends interrupt), Ctrl+V pastes, right-click copies a selection or pastes (PuTTY style) |
+
+### Local terminals and multi-exec
+
+Open PowerShell, Command Prompt, Git Bash or any WSL distro in a tab from the monitor button at the top of the sidebar, the start page or the command palette. Tusk finds the installed shells by itself and runs them in a real console (ConPTY), so colors, full-screen programs and resizing work.
+
+**Multi-exec** (the antenna button in any terminal's header) sends what you type to several terminals at once, SSH and local alike. Tick which ones take part, and use **Tile** to see them side by side.
 
 ### SSH tunnels
 
@@ -106,6 +112,7 @@ src-tauri/src/
   db.rs        sessions, query execution (simple protocol + Describe for column types), cancel
   ssh.rs       SSH terminals: connect, host-key checks, auth, PTY shell streamed to the UI
   sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
+  local.rs     local shells in a pseudo-terminal (ConPTY on Windows), shell detection
   tunnel.rs    SSH port forwarding (local, remote, SOCKS), shared per-host connections, DB tunnels
   store.rs     saved connections (JSON in %APPDATA%\dev.tusk.app) + Credential Manager passwords
   lib.rs       Tauri commands
@@ -119,7 +126,6 @@ src/
 
 ## Roadmap ideas
 
-- Local terminals (PowerShell, cmd, WSL) and multi-exec
 - Visual EXPLAIN plan viewer
 - ER diagram
 - Backup / restore via `pg_dump` / `pg_restore`

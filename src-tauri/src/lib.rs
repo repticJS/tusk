@@ -1,5 +1,6 @@
 mod db;
 mod error;
+mod local;
 mod sftp;
 mod ssh;
 mod store;
@@ -19,6 +20,9 @@ struct AppState {
     ssh: SshSessions,
     transfers: sftp::Transfers,
     tunnels: tunnel::Tunnels,
+    local: local::LocalTerms,
+    /// Shells found on this PC, detected once.
+    shells: Mutex<Option<Vec<local::Shell>>>,
 }
 
 impl AppState {
@@ -56,6 +60,16 @@ impl AppState {
         };
         let creds = self.ssh_creds(host_id)?;
         Ok(Some(self.tunnels.db_port(tunnel_id, &config.host, config.port, creds).await?))
+    }
+
+    async fn shells(&self) -> Vec<local::Shell> {
+        if let Some(s) = self.shells.lock().unwrap().clone() {
+            return s;
+        }
+        // Detection may run `wsl -l`; keep it off the async runtime's threads.
+        let found = tokio::task::spawn_blocking(local::detect_shells).await.unwrap_or_default();
+        *self.shells.lock().unwrap() = Some(found.clone());
+        found
     }
 
     async fn close_db(&self, conn_id: &str) {
@@ -365,6 +379,49 @@ async fn ssh_close(state: State<'_, AppState>, term_id: String) -> AppResult<()>
     Ok(())
 }
 
+// ---- local terminals ----
+
+#[tauri::command]
+async fn list_shells(state: State<'_, AppState>) -> AppResult<Vec<local::Shell>> {
+    Ok(state.shells().await)
+}
+
+#[tauri::command]
+async fn local_open(
+    state: State<'_, AppState>,
+    term_id: String,
+    shell_id: String,
+    cols: u16,
+    rows: u16,
+    events: Channel<InvokeResponseBody>,
+) -> AppResult<()> {
+    let shell = state
+        .shells()
+        .await
+        .into_iter()
+        .find(|s| s.id == shell_id)
+        .ok_or_else(|| AppError::msg("That shell isn't available on this PC"))?;
+    state.local.open(&term_id, &shell, cols, rows, events)
+}
+
+#[tauri::command]
+async fn local_write(app: tauri::AppHandle, term_id: String, data: String) -> AppResult<()> {
+    // A shell that isn't reading can block the write; keep it off the runtime.
+    tokio::task::spawn_blocking(move || app.state::<AppState>().local.write(&term_id, data.as_bytes()))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?
+}
+
+#[tauri::command]
+fn local_resize(state: State<'_, AppState>, term_id: String, cols: u16, rows: u16) {
+    state.local.resize(&term_id, cols, rows);
+}
+
+#[tauri::command]
+fn local_close(state: State<'_, AppState>, term_id: String) {
+    state.local.close(&term_id);
+}
+
 // ---- SFTP (over a terminal's connection) ----
 
 #[tauri::command]
@@ -460,6 +517,8 @@ pub fn run() {
                 ssh: SshSessions::new(),
                 transfers: sftp::Transfers::default(),
                 tunnels: tunnel::Tunnels::default(),
+                local: local::LocalTerms::default(),
+                shells: Mutex::new(None),
             });
             Ok(())
         })
@@ -498,6 +557,11 @@ pub fn run() {
             ssh_write,
             ssh_resize,
             ssh_close,
+            list_shells,
+            local_open,
+            local_write,
+            local_resize,
+            local_close,
             sftp_list,
             sftp_cwd,
             sftp_mkdir,

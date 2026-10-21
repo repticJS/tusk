@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0
+
+- Local terminals: PowerShell, Command Prompt, Git Bash and WSL distros in tabs, found automatically. Open one from the new monitor button at the top of the sidebar.
+- Multi-exec: type into several terminals at once, SSH and local, and optionally see them side by side.
+
 ## 0.3.0
 
 - SSH tunnels: local (-L), remote (-R) and dynamic SOCKS (-D) port forwarding through your saved SSH hosts. Manage them in the new Tunnels tab, with live connection and traffic counters. Tunnels reconnect by themselves if the connection drops, and can start automatically when Tusk opens.

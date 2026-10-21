@@ -19,6 +19,7 @@ import {
   SquareTerminal,
   Table2,
   TerminalSquare,
+  Monitor,
   Trash2,
   Waypoints,
   X,
@@ -43,6 +44,7 @@ export function Sidebar() {
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
   const folders = useApp((s) => s.folders);
+  const shells = useApp((s) => s.shells);
   const status = useApp((s) => s.status);
   const openConnectionDialog = useApp((s) => s.openConnectionDialog);
   const openSshDialog = useApp((s) => s.openSshDialog);
@@ -105,6 +107,20 @@ export function Sidebar() {
         <img src="/icon.svg" alt="" className="h-5 w-5" />
         <span className="text-[13.5px] font-semibold tracking-tight">Tusk</span>
         <div className="flex-1" />
+        <DropdownButton
+          className="btn-ghost h-7 px-1.5"
+          title="Local terminal"
+          label={<Monitor size={15} />}
+          items={
+            shells.length
+              ? shells.map((sh) => ({
+                  label: sh.name,
+                  icon: <Monitor size={13} />,
+                  onClick: () => useApp.getState().openLocalTerminal(sh.id),
+                }))
+              : [{ label: "No shells found", disabled: true, onClick: () => {} }]
+          }
+        />
         <button className="btn-ghost h-7 px-1.5" title="SSH tunnels" onClick={() => useApp.getState().openTunnelsTab()}>
           <Waypoints size={15} />
         </button>

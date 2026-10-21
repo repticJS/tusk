@@ -30,6 +30,7 @@ thiserror = "2"
 russh = { version = "0.64", default-features = false, features = ["flate2", "ring", "rsa"] }
 dirs = "6"
 russh-sftp = "3"
+portable-pty = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
