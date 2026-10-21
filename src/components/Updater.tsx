@@ -76,7 +76,17 @@ export const useUpdater = create<UpdaterState>()((set, get) => ({
 export function useUpdateChecks() {
   useEffect(() => {
     void getVersion()
-      .then((version) => useUpdater.setState({ version }))
+      .then((version) => {
+        useUpdater.setState({ version });
+        // Confirm a finished update on the first launch of the new version.
+        try {
+          const previous = localStorage.getItem("tusk-last-version");
+          if (previous && previous !== version) useApp.getState().showToast(`Updated to Tusk ${version}`, "ok");
+          localStorage.setItem("tusk-last-version", version);
+        } catch {
+          // Storage unavailable: skip the notice.
+        }
+      })
       .catch(() => {});
     const first = setTimeout(() => void useUpdater.getState().checkNow(false), 5000);
     const every = setInterval(() => void useUpdater.getState().checkNow(false), CHECK_EVERY_MS);

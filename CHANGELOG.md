@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- After an update, Tusk now confirms it on the next launch ("Updated to Tusk 0.2.1").
+
 ## 0.2.0
 
 - Automatic updates: Tusk checks for new versions and installs them with one click.
