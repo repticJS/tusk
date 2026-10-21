@@ -66,8 +66,8 @@ Download the installer from the [latest release](https://github.com/repticJS/tus
 ## Publishing a release
 
 1. Add notes for the new version at the top of `CHANGELOG.md` (they're shown in the update dialog) and commit.
-2. Run `npm run release 0.3.0`. This bumps the version everywhere, commits and tags.
-3. Run `git push origin main --follow-tags`. The workflow builds, signs and publishes the GitHub release with `latest.json`, and installed copies pick it up.
+2. Run `npm run release 0.3.0`. This bumps the version everywhere and commits.
+3. Run `git push origin main`. Seeing a version with no release yet, the workflow tags it, builds, signs and publishes the GitHub release with `latest.json`, and installed copies pick it up.
 
 Releases are signed with the updater key in the `TAURI_SIGNING_PRIVATE_KEY` repository secret. Keep a backup of that key: without it you can't ship updates to existing installs.
 

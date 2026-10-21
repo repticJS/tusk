@@ -1,7 +1,7 @@
 // Usage: npm run release <version>
 // Bumps the version in package.json, Cargo.toml, Cargo.lock and
-// tauri.conf.json, checks CHANGELOG.md has notes for it, then commits and
-// tags. Pushing the tag (git push origin main --tags) publishes the release
+// tauri.conf.json, checks CHANGELOG.md has notes for it, then commits.
+// Pushing the commit to main publishes the release (the workflow tags it),
 // and installed copies of Tusk update themselves.
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -29,7 +29,5 @@ edit("src-tauri/Cargo.toml", (s) => s.replace(/^version = "[^"]+"/m, `version = 
 edit("src-tauri/Cargo.lock", (s) => s.replace(/(name = "tusk"\nversion = )"[^"]+"/, `$1"${version}"`));
 execSync("npm install --package-lock-only --silent", { stdio: "inherit" });
 
-execSync(`git add -A && git commit -m "Release v${version}" && git tag -a v${version} -m "Tusk ${version}"`, {
-  stdio: "inherit",
-});
-console.log(`\nTagged v${version}. Publish with: git push origin main --follow-tags`);
+execSync(`git add -A && git commit -m "Release v${version}"`, { stdio: "inherit" });
+console.log(`\nCommitted v${version}. Publish with: git push origin main`);
