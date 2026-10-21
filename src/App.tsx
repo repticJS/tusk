@@ -10,6 +10,7 @@ import { HostKeyPrompt, SshDialog, SshSecretPrompt } from "./components/SshDialo
 import { TableTab } from "./components/TableTab";
 import { RemoteFileTab } from "./components/RemoteFileTab";
 import { TerminalTab } from "./components/TerminalTab";
+import { UpdateChip, UpdateDialog, useUpdateChecks } from "./components/Updater";
 import { Modal, useMenu } from "./components/ui";
 import { setPasswordPrompter } from "./lib/api";
 import { activeConnectionOf, useApp, type Tab } from "./store";
@@ -25,6 +26,7 @@ function newTabLikeActive() {
 }
 
 export default function App() {
+  useUpdateChecks();
   const tabs = useApp((s) => s.tabs);
   const activeTabId = useApp((s) => s.activeTabId);
   const connectionDialog = useApp((s) => s.connectionDialog);
@@ -122,6 +124,7 @@ export default function App() {
       <SshSecretPrompt />
       <HostKeyPrompt />
       <UnsavedCloseDialog />
+      <UpdateDialog />
       {paletteOpen && <CommandPalette />}
       {historyOpen && <HistoryDialog />}
       <Toast />
@@ -371,6 +374,7 @@ function StatusBar() {
         <span className="text-faint">Not connected</span>
       )}
       <div className="flex-1" />
+      <UpdateChip />
       <button className="flex items-center gap-1 hover:text-text" onClick={() => setPaletteOpen(true)}>
         <Search size={11} /> Ctrl+P
       </button>

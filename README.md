@@ -61,9 +61,19 @@ In a terminal, Ctrl+W, Ctrl+R and friends go to the shell. Use Ctrl+Shift+T, Ctr
 
 ## Getting the app
 
-**Easiest:** push this repo to GitHub. The included workflow (`.github/workflows/build.yml`) builds a Windows installer on every push. Download it from the run's **Artifacts**. Pushing a tag like `v0.1.0` creates a draft GitHub Release with the installers attached.
+Download the installer from the [latest release](https://github.com/repticJS/tusk/releases/latest). After that, Tusk updates itself: it checks for new versions at startup and every few hours, shows an **Update available** chip in the status bar, and installs with one click. Updates are signed, and Tusk refuses any download whose signature doesn't match.
 
-**Build it yourself on Windows:**
+## Publishing a release
+
+1. Add notes for the new version at the top of `CHANGELOG.md` (they're shown in the update dialog) and commit.
+2. Run `npm run release 0.3.0`. This bumps the version everywhere, commits and tags.
+3. Run `git push origin main --follow-tags`. The workflow builds, signs and publishes the GitHub release with `latest.json`, and installed copies pick it up.
+
+Releases are signed with the updater key in the `TAURI_SIGNING_PRIVATE_KEY` repository secret. Keep a backup of that key: without it you can't ship updates to existing installs.
+
+## Building it yourself
+
+Every push to `main` also builds test installers, downloadable from the workflow run's **Artifacts**. To build locally on Windows:
 
 1. Install [Node.js 22+](https://nodejs.org) and [Rust](https://rustup.rs) (choose the default MSVC toolchain; the installer offers the Visual Studio C++ build tools).
 2. Run:
@@ -100,4 +110,3 @@ src/
 - ER diagram
 - Backup / restore via `pg_dump` / `pg_restore`
 - Roles and permissions UI
-- Auto-update via the Tauri updater

@@ -1,9 +1,10 @@
-import { Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare } from "lucide-react";
+import { ArrowUpCircle, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { formatDuration } from "../lib/sql";
 import { activeConnectionOf, cacheKey, useApp } from "../store";
 import { Modal } from "./ui";
+import { useUpdater } from "./Updater";
 
 interface Item {
   id: string;
@@ -51,6 +52,13 @@ export function CommandPalette() {
       run: () => state.setTheme(state.theme === "dark" ? "light" : "dark"),
     });
     out.push({ id: "history", icon: <Clock size={14} />, label: "Query history", run: () => state.setHistoryOpen(true) });
+    out.push({
+      id: "updates",
+      icon: <ArrowUpCircle size={14} />,
+      label: "Check for updates",
+      detail: useUpdater.getState().version ? `v${useUpdater.getState().version}` : undefined,
+      run: () => void useUpdater.getState().checkNow(true),
+    });
     for (const h of state.sshHosts) {
       out.push({
         id: `ssh-${h.id}`,

@@ -34,20 +34,54 @@ jobs:
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
-      # Tagged pushes (v0.2.0 etc.) publish a draft GitHub release with the installers.
-      - name: Build and release
+      # ---- Releases: pushing a tag like v0.2.0 publishes a signed release.
+      # Installed copies of Tusk read latest.json from the newest release and
+      # update themselves.
+
+      - name: Check signing key
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::Add the TAURI_SIGNING_PRIVATE_KEY secret (Settings > Secrets and variables > Actions) to publish updates."
+            exit 1
+          fi
+
+      - name: Release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: notes
+        shell: bash
+        run: |
+          {
+            echo "body<<NOTES_EOF"
+            node scripts/changelog.mjs "${GITHUB_REF_NAME}"
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign and publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Tusk ${{ github.ref_name }}
-          releaseDraft: true
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+
+      # ---- Everything else: test builds, downloadable from the run's artifacts.
+      # Updater artifacts need the signing key, so they're skipped here.
 
       - name: Build
         if: "!startsWith(github.ref, 'refs/tags/v')"
-        run: npx tauri build
+        shell: bash
+        run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Upload installers
         if: "!startsWith(github.ref, 'refs/tags/v')"
