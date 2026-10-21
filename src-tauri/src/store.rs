@@ -29,6 +29,32 @@ pub struct ConnectionConfig {
     /// Sidebar folder; None is the top level.
     #[serde(default)]
     pub folder_id: Option<String>,
+    /// Reach the server through this saved SSH host. Host and port are then
+    /// as seen from the SSH server (often localhost:5432).
+    #[serde(default)]
+    pub ssh_host_id: Option<String>,
+}
+
+/// A saved SSH port forward.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelConfig {
+    pub id: String,
+    pub name: String,
+    pub host_id: String,
+    /// local (-L) | remote (-R) | dynamic (-D, SOCKS)
+    pub kind: String,
+    /// Address to listen on: on this PC for local/dynamic, on the server for remote.
+    pub bind_host: String,
+    pub bind_port: u16,
+    /// Where connections go: from the server for local, from this PC for remote.
+    #[serde(default)]
+    pub target_host: String,
+    #[serde(default)]
+    pub target_port: u16,
+    /// Start when Tusk starts.
+    #[serde(default)]
+    pub auto_start: bool,
 }
 
 /// A sidebar folder. Folders nest through parent_id and can hold both
@@ -58,6 +84,8 @@ struct StoreFile {
     ssh_hosts: Vec<SshConfig>,
     #[serde(default)]
     folders: Vec<Folder>,
+    #[serde(default)]
+    tunnels: Vec<TunnelConfig>,
 }
 
 pub struct Store {
@@ -138,11 +166,70 @@ impl Store {
         self.save()
     }
 
+    /// Deletes an SSH host and its tunnels. Refused while a database
+    /// connection goes through it, since that connection would silently start
+    /// connecting directly instead.
     pub fn delete_ssh(&mut self, id: &str) -> AppResult<()> {
+        let users: Vec<&str> = self
+            .file
+            .connections
+            .iter()
+            .filter(|c| c.ssh_host_id.as_deref() == Some(id))
+            .map(|c| c.name.as_str())
+            .collect();
+        if !users.is_empty() {
+            return Err(AppError::msg(format!(
+                "This SSH host is used by {}. Change {} to connect another way first.",
+                users.join(", "),
+                if users.len() == 1 { "that connection" } else { "those connections" }
+            )));
+        }
         self.file.ssh_hosts.retain(|c| c.id != id);
+        self.file.tunnels.retain(|t| t.host_id != id);
         self.save()?;
         secret::delete(&self.dir, &ssh_secret_key(id));
         Ok(())
+    }
+
+    // ---- tunnels ----
+
+    pub fn list_tunnels(&self) -> Vec<TunnelConfig> {
+        self.file.tunnels.clone()
+    }
+
+    pub fn get_tunnel(&self, id: &str) -> AppResult<TunnelConfig> {
+        self.file
+            .tunnels
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
+            .ok_or_else(|| AppError::msg(format!("Unknown tunnel {id}")))
+    }
+
+    pub fn save_tunnel(&mut self, tunnel: TunnelConfig) -> AppResult<()> {
+        if tunnel.name.trim().is_empty() {
+            return Err(AppError::msg("Give the tunnel a name"));
+        }
+        if !matches!(tunnel.kind.as_str(), "local" | "remote" | "dynamic") {
+            return Err(AppError::msg(format!("Unknown tunnel type {}", tunnel.kind)));
+        }
+        if tunnel.kind != "dynamic" && (tunnel.target_host.trim().is_empty() || tunnel.target_port == 0) {
+            return Err(AppError::msg("Enter the destination host and port"));
+        }
+        if tunnel.kind == "remote" && tunnel.bind_port == 0 {
+            return Err(AppError::msg("Enter the port to open on the server"));
+        }
+        self.get_ssh(&tunnel.host_id)?;
+        match self.file.tunnels.iter_mut().find(|t| t.id == tunnel.id) {
+            Some(existing) => *existing = tunnel,
+            None => self.file.tunnels.push(tunnel),
+        }
+        self.save()
+    }
+
+    pub fn delete_tunnel(&mut self, id: &str) -> AppResult<()> {
+        self.file.tunnels.retain(|t| t.id != id);
+        self.save()
     }
 
     // ---- folders ----
@@ -358,7 +445,61 @@ mod tests {
             save_password: false,
             show_system_schemas: false,
             folder_id: folder.map(Into::into),
+            ssh_host_id: None,
         }
+    }
+
+    fn host(id: &str) -> SshConfig {
+        SshConfig {
+            id: id.into(),
+            name: id.into(),
+            host: "example.com".into(),
+            port: 22,
+            user: "me".into(),
+            auth: "agent".into(),
+            key_path: None,
+            color: None,
+            save_secret: false,
+            start_dir: None,
+            folder_id: None,
+        }
+    }
+
+    fn tunnel(id: &str, host_id: &str) -> TunnelConfig {
+        TunnelConfig {
+            id: id.into(),
+            name: id.into(),
+            host_id: host_id.into(),
+            kind: "local".into(),
+            bind_host: "127.0.0.1".into(),
+            bind_port: 8080,
+            target_host: "localhost".into(),
+            target_port: 80,
+            auto_start: false,
+        }
+    }
+
+    #[test]
+    fn ssh_hosts_in_use_by_a_database_are_kept() {
+        let mut s = store();
+        s.upsert_ssh(host("bastion")).unwrap();
+        s.save_tunnel(tunnel("web", "bastion")).unwrap();
+        s.upsert(ConnectionConfig { ssh_host_id: Some("bastion".into()), ..conn("db", None) }).unwrap();
+        let err = s.delete_ssh("bastion").unwrap_err();
+        assert!(err.message.contains("used by db"), "{}", err.message);
+        // Once nothing goes through it, it and its tunnels are deleted.
+        s.upsert(conn("db", None)).unwrap();
+        s.delete_ssh("bastion").unwrap();
+        assert!(s.list_tunnels().is_empty());
+    }
+
+    #[test]
+    fn tunnels_are_validated() {
+        let mut s = store();
+        s.upsert_ssh(host("h")).unwrap();
+        assert!(s.save_tunnel(TunnelConfig { target_port: 0, ..tunnel("t", "h") }).is_err());
+        assert!(s.save_tunnel(tunnel("t", "missing")).is_err());
+        assert!(s.save_tunnel(TunnelConfig { kind: "dynamic".into(), target_host: "".into(), ..tunnel("t", "h") }).is_ok());
     }
 
     #[test]

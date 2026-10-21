@@ -1,6 +1,6 @@
 # Tusk
 
-A fast, modern desktop client for PostgreSQL, with built-in SSH terminals and SFTP. Built with Tauri 2 (Rust) and React.
+A fast, modern desktop client for PostgreSQL, with built-in SSH terminals, SFTP and SSH tunnels. Built with Tauri 2 (Rust) and React.
 
 - **Small and quick.** Native Rust backend, about a 10 MB install, opens instantly.
 - **Data grid that scales.** Canvas-rendered, loads rows as you scroll, handles 100k+ row results smoothly.
@@ -15,7 +15,7 @@ Works with PostgreSQL 9.6 and newer (tested against 9.6, 10, 11 and 16).
 
 | Area | What's there |
 |---|---|
-| Connections | Saved connections, paste a `postgres://` URL, test button, SSL modes, color tags (shown on tabs), passwords in Windows Credential Manager, nested folders mixing SSH hosts and databases (drag and drop) |
+| Connections | Saved connections, paste a `postgres://` URL, test button, SSL modes, connect through an SSH host, color tags (shown on tabs), passwords in Windows Credential Manager, nested folders mixing SSH hosts and databases (drag and drop) |
 | Browser | Databases → schemas → tables, views, materialized views, functions; filter box; row estimates |
 | Table view | Data, Structure (columns, indexes, constraints, triggers), generated DDL; WHERE filter; click a header to sort; exact or estimated counts |
 | Editing | Inline and value-panel editing, NULL handling, add and delete rows, SQL preview, single-transaction commit |
@@ -33,6 +33,20 @@ Works with PostgreSQL 9.6 and newer (tested against 9.6, 10, 11 and 16).
 | Host keys | Fingerprint confirmation on first connect, remembered afterwards; a clear warning if a server's key changes. Keys already in `~/.ssh/known_hosts` are trusted. |
 | Terminal | xterm.js with GPU rendering, 256 colors and Unicode, clickable links, find (Ctrl+Shift+F), resize follows the window, press Enter to reconnect |
 | Clipboard | Ctrl+C copies a selection (otherwise sends interrupt), Ctrl+V pastes, right-click copies a selection or pastes (PuTTY style) |
+
+### SSH tunnels
+
+Open the **Tunnels** tab from the sidebar's tunnel button, the status bar, or the command palette.
+
+| Type | What it does |
+|---|---|
+| Local (`-L`) | A port on this PC leads to a host and port reached from the server, e.g. `localhost:15432 → localhost:5432` |
+| Remote (`-R`) | A port opened on the server leads back to a service on this PC or your network |
+| Dynamic (`-D`) | A SOCKS4/4a/5 proxy on this PC that connects out from the server |
+
+Tunnels through the same host share one SSH connection, reconnect by themselves if it drops, show live connection and byte counters, and can start automatically when Tusk opens. They listen on this PC only unless you allow other computers.
+
+**PostgreSQL over SSH:** pick an SSH host under *Connect through* in a connection's settings. Tusk opens a private tunnel when you connect; host and port are then as seen from the SSH server (usually `localhost:5432`).
 
 ### SFTP file panel
 
@@ -92,6 +106,7 @@ src-tauri/src/
   db.rs        sessions, query execution (simple protocol + Describe for column types), cancel
   ssh.rs       SSH terminals: connect, host-key checks, auth, PTY shell streamed to the UI
   sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
+  tunnel.rs    SSH port forwarding (local, remote, SOCKS), shared per-host connections, DB tunnels
   store.rs     saved connections (JSON in %APPDATA%\dev.tusk.app) + Credential Manager passwords
   lib.rs       Tauri commands
 src/
@@ -99,12 +114,11 @@ src/
   lib/meta.ts  catalog introspection queries, DDL generation
   lib/sql.ts   statement splitter, quoting, formatting, export helpers
   store.ts     app state (zustand)
-  components/  Sidebar, QueryTab, TableTab, TerminalTab (xterm.js), SftpPanel, RemoteFileTab, DataGrid (Glide), SqlEditor (CodeMirror), dialogs
+  components/  Sidebar, QueryTab, TableTab, TerminalTab (xterm.js), SftpPanel, RemoteFileTab, TunnelsTab, DataGrid (Glide), SqlEditor (CodeMirror), dialogs
 ```
 
 ## Roadmap ideas
 
-- SSH tunnels, including PostgreSQL over SSH
 - Local terminals (PowerShell, cmd, WSL) and multi-exec
 - Visual EXPLAIN plan viewer
 - ER diagram

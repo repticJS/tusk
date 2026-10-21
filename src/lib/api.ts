@@ -15,6 +15,8 @@ export interface ConnectionConfig {
   showSystemSchemas: boolean;
   /** Sidebar folder; null/undefined is the top level. */
   folderId?: string | null;
+  /** Connect through this saved SSH host; host/port are then as seen from it. */
+  sshHostId?: string | null;
 }
 
 export interface Folder {
@@ -53,6 +55,8 @@ export interface AppErrorInfo {
   hint?: string | null;
   position?: number | null;
   kind?: string | null;
+  /** The saved SSH host an SSH_* error is about. */
+  sshHost?: string | null;
 }
 
 export interface StatementResult {
@@ -99,17 +103,43 @@ export function needsPassword(e: unknown): boolean {
   return !!info && (info.kind === "PASSWORD_REQUIRED" || info.code === "28P01");
 }
 
+/** SSH login problems (from tunnels and database connections through SSH)
+ * the user can fix at a prompt: unknown host key, missing or wrong password. */
+export function sshProblem(e: unknown): AppErrorInfo | null {
+  const info = e instanceof DbError ? e.info : null;
+  return info?.sshHost && info.kind?.startsWith("SSH_") ? info : null;
+}
+
 type PasswordPrompter = (connId: string, failed: boolean) => Promise<string | null>;
 let prompter: PasswordPrompter | null = null;
 export function setPasswordPrompter(p: PasswordPrompter) {
   prompter = p;
 }
 
+/** Asks the user about an SSH problem; resolves true when it's worth retrying. */
+type SshPrompter = (info: AppErrorInfo) => Promise<boolean>;
+let sshPrompter: SshPrompter | null = null;
+export function setSshPrompter(p: SshPrompter) {
+  sshPrompter = p;
+}
+
+/** Retries `fn` while the user fixes SSH problems at a prompt. */
+export async function withSshPrompts<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const info = sshProblem(e);
+      if (!info || !sshPrompter || attempt > 4 || !(await sshPrompter(info))) throw e;
+    }
+  }
+}
+
 /** Runs a session call, prompting for a password when the server wants one. */
 async function withPassword<T>(connId: string, fn: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await fn();
+      return await withSshPrompts(fn);
     } catch (e) {
       if (!needsPassword(e) || !prompter || attempt > 4) throw e;
       const failed = e instanceof DbError && e.info.code === "28P01";
@@ -127,7 +157,7 @@ export const api = {
   deleteConnection: (id: string) => call<void>("delete_connection", { id }),
   reorderConnections: (ids: string[]) => call<void>("reorder_connections", { ids }),
   testConnection: (config: ConnectionConfig, password: string | null) =>
-    call<SessionInfo>("test_connection", { config, password }),
+    withSshPrompts(() => call<SessionInfo>("test_connection", { config, password })),
   openSession: (session: SessionRef) =>
     withPassword(session.connId, () => call<SessionInfo>("open_session", { session })),
   closeSession: (session: SessionRef) => call<void>("close_session", { session }),
@@ -173,6 +203,8 @@ export const sshApi = {
   save: (config: SshHost, secret: string | null) => call<void>("save_ssh_host", { config, secret }),
   remove: (id: string) => call<void>("delete_ssh_host", { id }),
   setSecret: (id: string, secret: string, save: boolean) => call<void>("set_ssh_secret", { id, secret, save }),
+  /** Trusts a host key for the next tunnel or database connection through the host. */
+  acceptHostKey: (hostId: string, fingerprint: string) => call<void>("ssh_accept_host_key", { hostId, fingerprint }),
   /**
    * Opens a shell. Output arrives as ArrayBuffers on `onData`; lifecycle
    * events as objects on `onEvent`. Rejects with DbError for host-key and
@@ -199,6 +231,44 @@ export const sshApi = {
   write: (termId: string, data: string) => call<void>("ssh_write", { termId, data }),
   resize: (termId: string, cols: number, rows: number) => call<void>("ssh_resize", { termId, cols, rows }),
   close: (termId: string) => call<void>("ssh_close", { termId }),
+};
+
+// ---- tunnels ----
+
+export type TunnelKind = "local" | "remote" | "dynamic";
+
+export interface TunnelConfig {
+  id: string;
+  name: string;
+  hostId: string;
+  kind: TunnelKind;
+  /** Listen address: on this PC for local/dynamic, on the server for remote. */
+  bindHost: string;
+  bindPort: number;
+  /** Destination: reached from the server (local) or from this PC (remote). */
+  targetHost: string;
+  targetPort: number;
+  autoStart: boolean;
+}
+
+export interface TunnelStatus {
+  /** A saved tunnel's id, or "db:<connection id>" for a database connection's tunnel. */
+  id: string;
+  port: number;
+  active: number;
+  total: number;
+  bytesUp: number;
+  bytesDown: number;
+  error?: string | null;
+}
+
+export const tunnelApi = {
+  list: () => call<TunnelConfig[]>("list_tunnels"),
+  save: (tunnel: TunnelConfig) => call<void>("save_tunnel", { tunnel }),
+  remove: (id: string) => call<void>("delete_tunnel", { id }),
+  start: (id: string) => call<number>("start_tunnel", { id }),
+  stop: (id: string) => call<void>("stop_tunnel", { id }),
+  status: () => call<TunnelStatus[]>("tunnel_status"),
 };
 
 // ---- SFTP ----

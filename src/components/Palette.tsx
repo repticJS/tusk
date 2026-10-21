@@ -1,4 +1,4 @@
-import { ArrowUpCircle, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare } from "lucide-react";
+import { ArrowUpCircle, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { formatDuration } from "../lib/sql";
@@ -52,6 +52,7 @@ export function CommandPalette() {
       run: () => state.setTheme(state.theme === "dark" ? "light" : "dark"),
     });
     out.push({ id: "history", icon: <Clock size={14} />, label: "Query history", run: () => state.setHistoryOpen(true) });
+    out.push({ id: "tunnels", icon: <Waypoints size={14} />, label: "SSH tunnels", run: () => state.openTunnelsTab() });
     out.push({
       id: "updates",
       icon: <ArrowUpCircle size={14} />,

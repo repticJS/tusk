@@ -1,4 +1,4 @@
-import { Database, FileCode2, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, X } from "lucide-react";
+import { Database, FileCode2, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, X } from "lucide-react";
 import { useEffect } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useShallow } from "zustand/react/shallow";
@@ -10,9 +10,10 @@ import { HostKeyPrompt, SshDialog, SshSecretPrompt } from "./components/SshDialo
 import { TableTab } from "./components/TableTab";
 import { RemoteFileTab } from "./components/RemoteFileTab";
 import { TerminalTab } from "./components/TerminalTab";
+import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
 import { UpdateChip, UpdateDialog, useUpdateChecks } from "./components/Updater";
 import { Modal, useMenu } from "./components/ui";
-import { setPasswordPrompter } from "./lib/api";
+import { setPasswordPrompter, setSshPrompter } from "./lib/api";
 import { activeConnectionOf, useApp, type Tab } from "./store";
 
 /** Ctrl+T / "+": another terminal to the same host, or a query tab on the active database. */
@@ -31,12 +32,17 @@ export default function App() {
   const activeTabId = useApp((s) => s.activeTabId);
   const connectionDialog = useApp((s) => s.connectionDialog);
   const sshDialog = useApp((s) => s.sshDialog);
+  const tunnelDialog = useApp((s) => s.tunnelDialog);
   const paletteOpen = useApp((s) => s.paletteOpen);
   const historyOpen = useApp((s) => s.historyOpen);
 
   useEffect(() => {
     setPasswordPrompter((connId, failed) => useApp.getState().requestPassword(connId, failed));
-    void useApp.getState().loadConnections();
+    setSshPrompter((info) => useApp.getState().resolveSshProblem(info));
+    void useApp
+      .getState()
+      .loadConnections()
+      .then(() => useApp.getState().startAutoTunnels());
   }, []);
 
   // Global shortcuts.
@@ -108,6 +114,8 @@ export default function App() {
                     <TableTab tab={t} active={t.id === activeTabId} />
                   ) : t.kind === "terminal" ? (
                     <TerminalTab tab={t} active={t.id === activeTabId} />
+                  ) : t.kind === "tunnels" ? (
+                    <TunnelsTab tab={t} active={t.id === activeTabId} />
                   ) : (
                     <RemoteFileTab tab={t} active={t.id === activeTabId} />
                   )}
@@ -120,6 +128,7 @@ export default function App() {
       <StatusBar />
       {connectionDialog.open && <ConnectionDialog key={connectionDialog.editing?.id ?? "new"} />}
       {sshDialog.open && <SshDialog key={sshDialog.editing?.id ?? "new"} />}
+      {tunnelDialog.open && <TunnelDialog key={tunnelDialog.editing?.id || "new"} />}
       <PasswordPrompt />
       <SshSecretPrompt />
       <HostKeyPrompt />
@@ -150,9 +159,11 @@ function TabBar() {
       <div className="flex min-w-0 flex-1 items-end overflow-x-auto [scrollbar-width:none]">
         {tabs.map((t) => {
           const conn =
-            t.kind === "terminal" || t.kind === "remote"
-              ? sshHosts.find((h) => h.id === t.hostId)
-              : connections.find((c) => c.id === t.connId);
+            t.kind === "tunnels"
+              ? undefined
+              : t.kind === "terminal" || t.kind === "remote"
+                ? sshHosts.find((h) => h.id === t.hostId)
+                : connections.find((c) => c.id === t.connId);
           const active = t.id === activeTabId;
           return (
             <div
@@ -175,11 +186,13 @@ function TabBar() {
                 ]);
               }}
               title={
-                t.kind === "terminal"
-                  ? `SSH: ${conn?.name ?? ""}`
-                  : t.kind === "remote"
-                    ? `${conn?.name ?? ""}:${t.path}`
-                    : `${conn?.name ?? ""} / ${t.database}`
+                t.kind === "tunnels"
+                  ? "SSH tunnels"
+                  : t.kind === "terminal"
+                    ? `SSH: ${conn?.name ?? ""}`
+                    : t.kind === "remote"
+                      ? `${conn?.name ?? ""}:${t.path}`
+                      : `${conn?.name ?? ""} / ${t.database}`
               }
             >
               {/* Connection color strip: red for production makes mistakes harder. */}
@@ -194,6 +207,8 @@ function TabBar() {
                   <Table2 size={13} />
                 ) : t.kind === "terminal" ? (
                   <TerminalSquare size={13} />
+                ) : t.kind === "tunnels" ? (
+                  <Waypoints size={13} />
                 ) : (
                   <FileCode2 size={13} />
                 )}
@@ -353,6 +368,7 @@ function StatusBar() {
       return { name: c?.name, color: c?.color, database: a?.database, status: c ? s.status[c.id] : undefined };
     }),
   );
+  const tunnelCount = useApp((s) => Object.keys(s.tunnelStatus).filter((id) => !id.startsWith("test:")).length);
   return (
     <div className="flex h-6 shrink-0 items-center gap-3 border-t border-border bg-panel px-3 text-[11.5px] text-muted">
       {ssh.name ? (
@@ -374,6 +390,15 @@ function StatusBar() {
         <span className="text-faint">Not connected</span>
       )}
       <div className="flex-1" />
+      {tunnelCount > 0 && (
+        <button
+          className="flex items-center gap-1 hover:text-text"
+          title="SSH tunnels"
+          onClick={() => useApp.getState().openTunnelsTab()}
+        >
+          <Waypoints size={11} className="text-ok" /> {tunnelCount} tunnel{tunnelCount === 1 ? "" : "s"}
+        </button>
+      )}
       <UpdateChip />
       <button className="flex items-center gap-1 hover:text-text" onClick={() => setPaletteOpen(true)}>
         <Search size={11} /> Ctrl+P

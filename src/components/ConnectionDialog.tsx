@@ -27,6 +27,7 @@ export function ConnectionDialog() {
   const loadConnections = useApp((s) => s.loadConnections);
   const connect = useApp((s) => s.connect);
   const showToast = useApp((s) => s.showToast);
+  const sshHosts = useApp((s) => s.sshHosts);
 
   const [cfg, setCfg] = useState<ConnectionConfig>(() => (editing ? { ...editing } : blankConnection()));
   const [password, setPassword] = useState("");
@@ -141,8 +142,33 @@ export function ConnectionDialog() {
             </div>
           </Field>
         </div>
+        <Field
+          label="Connect through"
+          hint={
+            cfg.sshHostId
+              ? "Host and port below are as seen from the SSH server. For a database on that server, use localhost."
+              : undefined
+          }
+        >
+          <select
+            className="field"
+            aria-label="Connect through"
+            value={cfg.sshHostId ?? ""}
+            onChange={(e) => set("sshHostId", e.target.value || null)}
+          >
+            <option value="">Direct connection</option>
+            {sshHosts.map((h) => (
+              <option key={h.id} value={h.id}>
+                SSH tunnel via {h.name} ({h.user}@{h.host})
+              </option>
+            ))}
+            {cfg.sshHostId && !sshHosts.some((h) => h.id === cfg.sshHostId) && (
+              <option value={cfg.sshHostId}>Missing SSH host</option>
+            )}
+          </select>
+        </Field>
         <div className="flex gap-3">
-          <Field label="Host" className="flex-1">
+          <Field label={cfg.sshHostId ? "Host (from the SSH server)" : "Host"} className="flex-1">
             <input className="field" value={cfg.host} onChange={(e) => set("host", e.target.value)} spellCheck={false} />
           </Field>
           <Field label="Port" className="w-24">

@@ -11,7 +11,7 @@
 use crate::error::{AppError, AppResult};
 use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
-use russh::{ChannelMsg, Disconnect};
+use russh::{ChannelMsg, ChannelOpenFailure, Disconnect};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -124,6 +124,8 @@ pub struct Client {
     accept: Option<String>,
     issue: Arc<StdMutex<Option<HostKeyIssue>>>,
     banner: Arc<StdMutex<Option<String>>>,
+    /// Remote (-R) forwards opened on this connection, by server port.
+    forwards: crate::tunnel::RemoteForwards,
 }
 
 fn fingerprint(key: &PublicKey) -> String {
@@ -186,6 +188,27 @@ impl client::Handler for Client {
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
         *self.banner.lock().unwrap() = Some(banner.to_string());
+        Ok(())
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let forward = self.forwards.lock().unwrap().get(&connected_port).cloned();
+        match forward {
+            Some(f) => {
+                reply.accept().await;
+                tokio::spawn(crate::tunnel::serve_remote(channel, f));
+            }
+            None => reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await,
+        }
         Ok(())
     }
 }
@@ -312,29 +335,29 @@ fn expand_home(path: &str) -> PathBuf {
     }
 }
 
-// ---- opening a terminal ----
+// ---- connecting ----
 
-pub struct OpenRequest {
-    pub term_id: String,
-    pub config: SshConfig,
-    pub secret: Option<String>,
-    pub accept_fingerprint: Option<String>,
-    pub cols: u32,
-    pub rows: u32,
-    pub known_hosts: PathBuf,
-}
-
-pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<InvokeResponseBody>) -> AppResult<()> {
-    let cfg = &req.config;
+/// Connects and authenticates. `accept_fingerprint` is a host key the user
+/// has just approved. Fails with kind HOSTKEY_UNKNOWN / HOSTKEY_CHANGED,
+/// PASSWORD_REQUIRED, PASSPHRASE_REQUIRED, AUTH_FAILED or AUTH_REJECTED when
+/// the user needs to be asked something.
+pub async fn connect(
+    cfg: &SshConfig,
+    secret: Option<&str>,
+    accept_fingerprint: Option<String>,
+    known_hosts: &std::path::Path,
+    forwards: crate::tunnel::RemoteForwards,
+) -> AppResult<(Handle<Client>, Option<String>)> {
     let issue = Arc::new(StdMutex::new(None));
     let banner = Arc::new(StdMutex::new(None));
     let handler = Client {
         host: cfg.host.clone(),
         port: cfg.port,
-        known_hosts: req.known_hosts.clone(),
-        accept: req.accept_fingerprint.clone(),
+        known_hosts: known_hosts.to_path_buf(),
+        accept: accept_fingerprint,
         issue: issue.clone(),
         banner: banner.clone(),
+        forwards,
     };
     let config = Arc::new(client::Config {
         keepalive_interval: Some(Duration::from_secs(30)),
@@ -357,10 +380,10 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
     let ok = match cfg.auth.as_str() {
         "key" => {
             let path = cfg.key_path.as_deref().filter(|p| !p.is_empty()).ok_or_else(|| AppError::msg("No private key file chosen"))?;
-            auth_key(&mut handle, &cfg.user, path, req.secret.as_deref()).await?
+            auth_key(&mut handle, &cfg.user, path, secret).await?
         }
         "agent" => auth_agent(&mut handle, &cfg.user).await?,
-        _ => match req.secret.as_deref() {
+        _ => match secret {
             None => return Err(AppError::kind("PASSWORD_REQUIRED", "A password is required")),
             Some(pw) => auth_password(&mut handle, &cfg.user, pw).await?,
         },
@@ -369,6 +392,26 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
         let kind = if cfg.auth == "password" { "AUTH_FAILED" } else { "AUTH_REJECTED" };
         return Err(AppError::kind(kind, format!("Authentication failed for {}@{}", cfg.user, cfg.host)));
     }
+    let banner = banner.lock().unwrap().take();
+    Ok((handle, banner))
+}
+
+// ---- opening a terminal ----
+
+pub struct OpenRequest {
+    pub term_id: String,
+    pub config: SshConfig,
+    pub secret: Option<String>,
+    pub accept_fingerprint: Option<String>,
+    pub cols: u32,
+    pub rows: u32,
+    pub known_hosts: PathBuf,
+}
+
+pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<InvokeResponseBody>) -> AppResult<()> {
+    let cfg = &req.config;
+    let (handle, banner) =
+        connect(cfg, req.secret.as_deref(), req.accept_fingerprint.clone(), &req.known_hosts, Default::default()).await?;
 
     let mut channel = handle.channel_open_session().await.map_err(ssh_err)?;
     channel
@@ -386,7 +429,6 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
     let conn = Arc::new(Connection { handle, sftp: Default::default() });
     sessions.terms.lock().await.insert(req.term_id.clone(), Terminal { tx, conn: conn.clone() });
 
-    let banner = banner.lock().unwrap().take();
     let _ = events.send(json(&TermEvent::Connected { banner }));
 
     tokio::spawn(async move {

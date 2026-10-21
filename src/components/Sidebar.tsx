@@ -20,11 +20,12 @@ import {
   Table2,
   TerminalSquare,
   Trash2,
+  Waypoints,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ConnectionConfig, Folder, ItemKind, SshHost } from "../lib/api";
-import { blankConnection, blankSshHost } from "../lib/defaults";
+import { blankConnection, blankSshHost, blankTunnel } from "../lib/defaults";
 import * as meta from "../lib/meta";
 import { qualified } from "../lib/sql";
 import { clickSuppressed, startTreeDrag, useTreeDrag, type DragItem } from "../lib/treeDrag";
@@ -104,6 +105,9 @@ export function Sidebar() {
         <img src="/icon.svg" alt="" className="h-5 w-5" />
         <span className="text-[13.5px] font-semibold tracking-tight">Tusk</span>
         <div className="flex-1" />
+        <button className="btn-ghost h-7 px-1.5" title="SSH tunnels" onClick={() => useApp.getState().openTunnelsTab()}>
+          <Waypoints size={15} />
+        </button>
         <DropdownButton
           className="btn-ghost h-7 px-1.5"
           title="New connection or folder"
@@ -458,6 +462,15 @@ function SshNode({
         onContextMenu={(e) =>
           openMenu(e, [
             { label: "Open terminal", icon: <TerminalSquare size={13} />, onClick: () => openTerminalTab(host.id) },
+            {
+              label: "New tunnel…",
+              icon: <Waypoints size={13} />,
+              onClick: () => {
+                const s = useApp.getState();
+                s.openTunnelsTab();
+                s.openTunnelDialog(blankTunnel(host.id));
+              },
+            },
             "separator",
             { label: "Edit…", icon: <Pencil size={13} />, onClick: () => openSshDialog(host) },
             {
@@ -571,6 +584,7 @@ function ConnectionNode({ conn, ...p }: NodeProps & { conn: ConnectionConfig }) 
   const openQueryTab = useApp((s) => s.openQueryTab);
   const refresh = useApp((s) => s.refresh);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const via = useApp((s) => (conn.sshHostId ? s.sshHosts.find((h) => h.id === conn.sshHostId) : undefined));
   const key = conn.id;
   const open = p.expanded.has(key) && status?.state === "connected";
 
@@ -644,7 +658,7 @@ function ConnectionNode({ conn, ...p }: NodeProps & { conn: ConnectionConfig }) 
             </span>
           ) : undefined
         }
-        title={`${conn.user}@${conn.host}:${conn.port}/${conn.database}`}
+        title={`${conn.user}@${conn.host}:${conn.port}/${conn.database}${via ? `\nThrough SSH host ${via.name}` : ""}`}
         onClick={() => !clickSuppressed() && void activate()}
         onContextMenu={(e) => p.openMenu(e, items)}
         actions={

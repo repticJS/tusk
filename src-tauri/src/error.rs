@@ -13,6 +13,8 @@ pub struct AppError {
     pub position: Option<u32>,
     /// Set for errors the UI handles specially, e.g. "PASSWORD_REQUIRED".
     pub kind: Option<String>,
+    /// The saved SSH host an SSH_* error is about.
+    pub ssh_host: Option<String>,
 }
 
 impl AppError {
@@ -45,6 +47,7 @@ impl From<tokio_postgres::Error> for AppError {
                 hint: db.hint().map(str::to_string),
                 position,
                 kind: None,
+                ssh_host: None,
             };
         }
         let text = e.to_string();

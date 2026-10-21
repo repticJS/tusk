@@ -3,13 +3,14 @@ mod error;
 mod sftp;
 mod ssh;
 mod store;
+mod tunnel;
 
 use db::{SessionInfo, SessionRef, Sessions, StatementResult};
 use ssh::{SshConfig, SshSessions};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use error::{AppError, AppResult};
 use std::sync::Mutex;
-use store::{ConnectionConfig, Folder, ItemRef, Store};
+use store::{ConnectionConfig, Folder, ItemRef, Store, TunnelConfig};
 use tauri::{Manager, State};
 
 struct AppState {
@@ -17,6 +18,7 @@ struct AppState {
     sessions: Sessions,
     ssh: SshSessions,
     transfers: sftp::Transfers,
+    tunnels: tunnel::Tunnels,
 }
 
 impl AppState {
@@ -34,7 +36,38 @@ impl AppState {
     async fn session(&self, sref: &SessionRef) -> AppResult<std::sync::Arc<db::Session>> {
         let config = self.config(&sref.conn_id)?;
         let password = self.password(&sref.conn_id);
-        self.sessions.get_or_open(sref, &config, password).await
+        let via = self.db_tunnel(&format!("db:{}", config.id), &config).await?;
+        self.sessions.get_or_open(sref, &config, password, via).await
+    }
+
+    fn ssh_creds(&self, host_id: &str) -> AppResult<tunnel::Creds> {
+        let store = self.store.lock().unwrap();
+        let config = store.get_ssh(host_id)?;
+        let stored = store.get_ssh_secret(host_id);
+        let secret = self.ssh.transient_secrets.lock().unwrap().get(host_id).cloned().or(stored);
+        Ok(tunnel::Creds { config, secret, known_hosts: store.known_hosts_path() })
+    }
+
+    /// Starts (or finds) the SSH tunnel a database connection goes through and
+    /// returns its local port; None for direct connections.
+    async fn db_tunnel(&self, tunnel_id: &str, config: &ConnectionConfig) -> AppResult<Option<u16>> {
+        let Some(host_id) = config.ssh_host_id.as_deref().filter(|h| !h.is_empty()) else {
+            return Ok(None);
+        };
+        let creds = self.ssh_creds(host_id)?;
+        Ok(Some(self.tunnels.db_port(tunnel_id, &config.host, config.port, creds).await?))
+    }
+
+    async fn close_db(&self, conn_id: &str) {
+        self.sessions.close_connection(conn_id).await;
+        self.tunnels.stop(&format!("db:{conn_id}")).await;
+    }
+
+    /// Lets running tunnels reconnect with a host's latest settings.
+    async fn refresh_tunnel_creds(&self, host_id: &str) {
+        if let Ok(creds) = self.ssh_creds(host_id) {
+            self.tunnels.update_creds(creds).await;
+        }
     }
 }
 
@@ -66,13 +99,13 @@ async fn save_connection(
         state.sessions.transient_passwords.lock().unwrap().insert(id.clone(), p);
     }
     // Settings may have changed; reconnect lazily on next use.
-    state.sessions.close_connection(&id).await;
+    state.close_db(&id).await;
     Ok(())
 }
 
 #[tauri::command]
 async fn delete_connection(state: State<'_, AppState>, id: String) -> AppResult<()> {
-    state.sessions.close_connection(&id).await;
+    state.close_db(&id).await;
     state.sessions.transient_passwords.lock().unwrap().remove(&id);
     state.store.lock().unwrap().delete(&id)
 }
@@ -101,8 +134,14 @@ async fn test_connection(
 ) -> AppResult<SessionInfo> {
     // No typed password: test an existing connection with what's stored.
     let password = password.or_else(|| state.password(&config.id));
-    let session = db::connect(&config, &config.database, password).await?;
-    Ok(session.info())
+    let tunnel_id = format!("test:{}", uuid::Uuid::new_v4());
+    let result = async {
+        let via = state.db_tunnel(&tunnel_id, &config).await?;
+        Ok(db::connect(&config, &config.database, password, via).await?.info())
+    }
+    .await;
+    state.tunnels.stop(&tunnel_id).await;
+    result
 }
 
 #[tauri::command]
@@ -118,7 +157,7 @@ async fn close_session(state: State<'_, AppState>, session: SessionRef) -> AppRe
 
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>, conn_id: String) -> AppResult<()> {
-    state.sessions.close_connection(&conn_id).await;
+    state.close_db(&conn_id).await;
     Ok(())
 }
 
@@ -183,36 +222,109 @@ fn list_ssh_hosts(state: State<'_, AppState>) -> Vec<SshConfig> {
 /// Saves an SSH host. `secret` (password or key passphrase) of None leaves a
 /// stored one alone.
 #[tauri::command]
-fn save_ssh_host(state: State<'_, AppState>, config: SshConfig, secret: Option<String>) -> AppResult<()> {
+async fn save_ssh_host(state: State<'_, AppState>, config: SshConfig, secret: Option<String>) -> AppResult<()> {
     let id = config.id.clone();
     let save = config.save_secret;
-    let store = &mut state.store.lock().unwrap();
-    store.upsert_ssh(config)?;
-    if !save {
-        store.set_ssh_secret(&id, None)?;
-        if let Some(s) = secret {
-            state.ssh.transient_secrets.lock().unwrap().insert(id, s);
+    {
+        let store = &mut state.store.lock().unwrap();
+        store.upsert_ssh(config)?;
+        if !save {
+            store.set_ssh_secret(&id, None)?;
+            if let Some(s) = secret {
+                state.ssh.transient_secrets.lock().unwrap().insert(id.clone(), s);
+            }
+        } else if let Some(s) = secret.as_deref() {
+            store.set_ssh_secret(&id, Some(s))?;
         }
-    } else if let Some(s) = secret.as_deref() {
-        store.set_ssh_secret(&id, Some(s))?;
     }
+    state.refresh_tunnel_creds(&id).await;
     Ok(())
 }
 
 #[tauri::command]
-fn delete_ssh_host(state: State<'_, AppState>, id: String) -> AppResult<()> {
+async fn delete_ssh_host(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let tunnels: Vec<String> = {
+        let store = &mut state.store.lock().unwrap();
+        let ids = store.list_tunnels().into_iter().filter(|t| t.host_id == id).map(|t| t.id).collect();
+        store.delete_ssh(&id)?;
+        ids
+    };
+    for t in tunnels {
+        state.tunnels.stop(&t).await;
+    }
     state.ssh.transient_secrets.lock().unwrap().remove(&id);
-    state.store.lock().unwrap().delete_ssh(&id)
+    Ok(())
 }
 
 /// Remembers a password/passphrase typed at a prompt; `save` also stores it.
 #[tauri::command]
-fn set_ssh_secret(state: State<'_, AppState>, id: String, secret: String, save: bool) -> AppResult<()> {
+async fn set_ssh_secret(state: State<'_, AppState>, id: String, secret: String, save: bool) -> AppResult<()> {
     if save {
         state.store.lock().unwrap().set_ssh_secret(&id, Some(&secret))?;
     }
-    state.ssh.transient_secrets.lock().unwrap().insert(id, secret);
+    state.ssh.transient_secrets.lock().unwrap().insert(id.clone(), secret);
+    state.refresh_tunnel_creds(&id).await;
     Ok(())
+}
+
+/// Trusts a host key the user approved, for the next tunnel or database
+/// connection through that host.
+#[tauri::command]
+fn ssh_accept_host_key(state: State<'_, AppState>, host_id: String, fingerprint: String) {
+    state.tunnels.accept_host_key(&host_id, fingerprint);
+}
+
+// ---- tunnels ----
+
+#[tauri::command]
+fn list_tunnels(state: State<'_, AppState>) -> Vec<TunnelConfig> {
+    state.store.lock().unwrap().list_tunnels()
+}
+
+/// Saves a tunnel. A running tunnel is stopped so the new settings take
+/// effect on its next start.
+#[tauri::command]
+async fn save_tunnel(state: State<'_, AppState>, tunnel: TunnelConfig) -> AppResult<()> {
+    let id = tunnel.id.clone();
+    state.store.lock().unwrap().save_tunnel(tunnel)?;
+    state.tunnels.stop(&id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_tunnel(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.tunnels.stop(&id).await;
+    state.store.lock().unwrap().delete_tunnel(&id)
+}
+
+/// Starts a saved tunnel and returns the port it listens on.
+#[tauri::command]
+async fn start_tunnel(state: State<'_, AppState>, id: String) -> AppResult<u16> {
+    let t = state.store.lock().unwrap().get_tunnel(&id)?;
+    let creds = state.ssh_creds(&t.host_id)?;
+    let req = tunnel::StartRequest {
+        id: t.id,
+        kind: t.kind,
+        bind_host: t.bind_host,
+        bind_port: t.bind_port,
+        target_host: t.target_host,
+        target_port: t.target_port,
+        creds,
+    };
+    state.tunnels.start(req).await
+}
+
+#[tauri::command]
+async fn stop_tunnel(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.tunnels.stop(&id).await;
+    Ok(())
+}
+
+/// Every running tunnel, including the private ones of database connections
+/// (ids "db:<connection id>").
+#[tauri::command]
+async fn tunnel_status(state: State<'_, AppState>) -> AppResult<Vec<tunnel::TunnelStatus>> {
+    Ok(state.tunnels.status().await)
 }
 
 #[tauri::command]
@@ -347,6 +459,7 @@ pub fn run() {
                 sessions: Sessions::new(),
                 ssh: SshSessions::new(),
                 transfers: sftp::Transfers::default(),
+                tunnels: tunnel::Tunnels::default(),
             });
             Ok(())
         })
@@ -374,6 +487,13 @@ pub fn run() {
             save_ssh_host,
             delete_ssh_host,
             set_ssh_secret,
+            ssh_accept_host_key,
+            list_tunnels,
+            save_tunnel,
+            delete_tunnel,
+            start_tunnel,
+            stop_tunnel,
+            tunnel_status,
             ssh_open,
             ssh_write,
             ssh_resize,

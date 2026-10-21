@@ -1,6 +1,20 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { api, folderApi, sshApi, type ConnectionConfig, type Folder, type ItemKind, type SessionRef, type SshHost } from "./lib/api";
+import {
+  api,
+  folderApi,
+  sshApi,
+  tunnelApi,
+  withSshPrompts,
+  type AppErrorInfo,
+  type ConnectionConfig,
+  type Folder,
+  type ItemKind,
+  type SessionRef,
+  type SshHost,
+  type TunnelConfig,
+  type TunnelStatus,
+} from "./lib/api";
 import * as meta from "./lib/meta";
 
 export interface QueryTab {
@@ -41,9 +55,16 @@ export interface RemoteFileTab {
   path: string;
 }
 
+/** The SSH tunnel manager (one at most). */
+export interface TunnelsTab {
+  id: string;
+  kind: "tunnels";
+  title: string;
+}
+
 /** Tabs bound to a database connection. */
 export type DbTab = QueryTab | TableTab;
-export type Tab = DbTab | TerminalTab | RemoteFileTab;
+export type Tab = DbTab | TerminalTab | RemoteFileTab | TunnelsTab;
 
 export const isDbTab = (t: Tab | undefined): t is DbTab => !!t && (t.kind === "query" || t.kind === "table");
 
@@ -113,9 +134,16 @@ interface State {
   /** A tab with unsaved edits the user asked to close. */
   pendingCloseTab: string | null;
   history: HistoryEntry[];
+  tunnels: TunnelConfig[];
+  /** Running tunnels by id, including database connections' ("db:<id>"). */
+  tunnelStatus: Record<string, TunnelStatus | undefined>;
+  /** Tunnels being started, and why the last start failed. */
+  tunnelBusy: Record<string, boolean | undefined>;
+  tunnelErrors: Record<string, string | undefined>;
 
   connectionDialog: { open: boolean; editing?: ConnectionConfig };
   sshDialog: { open: boolean; editing?: SshHost };
+  tunnelDialog: { open: boolean; editing?: Partial<TunnelConfig> };
   passwordRequest: PasswordRequest | null;
   sshSecretRequest: SshSecretRequest | null;
   hostKeyRequest: HostKeyRequest | null;
@@ -145,6 +173,18 @@ interface State {
   resolveSshSecret(r: { secret: string; save: boolean } | null): void;
   requestHostKey(r: Omit<HostKeyRequest, "resolve">): Promise<boolean>;
   resolveHostKey(accept: boolean): void;
+  /** Prompts about an SSH login problem; true when the caller should retry. */
+  resolveSshProblem(info: AppErrorInfo): Promise<boolean>;
+  loadTunnels(): Promise<void>;
+  refreshTunnelStatus(): Promise<void>;
+  startTunnel(id: string): Promise<boolean>;
+  stopTunnel(id: string): Promise<void>;
+  saveTunnel(t: TunnelConfig): Promise<boolean>;
+  deleteTunnel(id: string): Promise<void>;
+  startAutoTunnels(): Promise<void>;
+  openTunnelDialog(editing?: Partial<TunnelConfig>): void;
+  closeTunnelDialog(): void;
+  openTunnelsTab(): void;
   connect(connId: string): Promise<boolean>;
   disconnect(connId: string): Promise<void>;
   deleteConnection(connId: string): Promise<void>;
@@ -208,8 +248,13 @@ export const useApp = create<State>()(
       dirty: {},
       pendingCloseTab: null,
       history: [],
+      tunnels: [],
+      tunnelStatus: {},
+      tunnelBusy: {},
+      tunnelErrors: {},
       connectionDialog: { open: false },
       sshDialog: { open: false },
+      tunnelDialog: { open: false },
       passwordRequest: null,
       sshSecretRequest: null,
       hostKeyRequest: null,
@@ -225,18 +270,21 @@ export const useApp = create<State>()(
       setRowLimit: (rowLimit) => set({ rowLimit }),
 
       async loadConnections() {
-        const [connections, sshHosts, folders] = await Promise.all([
+        const [connections, sshHosts, folders, tunnels] = await Promise.all([
           api.listConnections(),
           sshApi.list(),
           folderApi.list(),
+          tunnelApi.list(),
         ]);
         // Drop tabs whose connection or host no longer exists.
         const ids = new Set([...connections.map((c) => c.id), ...sshHosts.map((h) => h.id)]);
-        const tabs = get().tabs.filter((t) => ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId));
+        const tabs = get().tabs.filter(
+          (t) => t.kind === "tunnels" || ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId),
+        );
         const activeTabId = tabs.some((t) => t.id === get().activeTabId)
           ? get().activeTabId
           : (tabs[0]?.id ?? null);
-        set({ connections, sshHosts, folders, tabs, activeTabId });
+        set({ connections, sshHosts, folders, tunnels, tabs, activeTabId });
       },
 
       openConnectionDialog: (editing) => set({ connectionDialog: { open: true, editing } }),
@@ -245,7 +293,12 @@ export const useApp = create<State>()(
       closeSshDialog: () => set({ sshDialog: { open: false } }),
 
       async deleteSshHost(id) {
-        await sshApi.remove(id);
+        try {
+          await sshApi.remove(id);
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+          return;
+        }
         set((s) => {
           const tabs = s.tabs.filter((t) => !((t.kind === "terminal" || t.kind === "remote") && t.hostId === id));
           return {
@@ -254,6 +307,7 @@ export const useApp = create<State>()(
           };
         });
         await get().loadConnections();
+        await get().refreshTunnelStatus();
       },
 
       openTerminalTab(hostId) {
@@ -356,6 +410,103 @@ export const useApp = create<State>()(
         set({ hostKeyRequest: null });
       },
 
+      async resolveSshProblem(info) {
+        const hostId = info.sshHost;
+        const kind = info.kind?.replace(/^SSH_/, "");
+        if (!hostId) return false;
+        if (kind === "HOSTKEY_UNKNOWN" || kind === "HOSTKEY_CHANGED") {
+          const ok = await get().requestHostKey({
+            hostId,
+            message: info.message.replace(/^SSH [^:]*: /, ""),
+            key: info.detail ?? "",
+            changed: kind === "HOSTKEY_CHANGED",
+          });
+          if (ok && info.hint) await sshApi.acceptHostKey(hostId, info.hint);
+          return ok;
+        }
+        if (kind === "PASSWORD_REQUIRED" || kind === "AUTH_FAILED" || kind === "PASSPHRASE_REQUIRED") {
+          const r = await get().requestSshSecret({
+            hostId,
+            what: kind === "PASSPHRASE_REQUIRED" ? "passphrase" : "password",
+            message: kind === "PASSWORD_REQUIRED" ? undefined : info.message,
+          });
+          if (r) await sshApi.setSecret(hostId, r.secret, r.save);
+          return !!r;
+        }
+        return false;
+      },
+
+      async loadTunnels() {
+        set({ tunnels: await tunnelApi.list() });
+      },
+
+      async refreshTunnelStatus() {
+        const list = await tunnelApi.status();
+        set({ tunnelStatus: Object.fromEntries(list.map((t) => [t.id, t])) });
+      },
+
+      async startTunnel(id) {
+        if (get().tunnelBusy[id]) return false;
+        set((s) => ({ tunnelBusy: { ...s.tunnelBusy, [id]: true }, tunnelErrors: { ...s.tunnelErrors, [id]: undefined } }));
+        try {
+          await withSshPrompts(() => tunnelApi.start(id));
+          return true;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          set((s) => ({ tunnelErrors: { ...s.tunnelErrors, [id]: msg } }));
+          return false;
+        } finally {
+          set((s) => ({ tunnelBusy: { ...s.tunnelBusy, [id]: false } }));
+          await get().refreshTunnelStatus();
+        }
+      },
+
+      async stopTunnel(id) {
+        await tunnelApi.stop(id);
+        set((s) => ({ tunnelErrors: { ...s.tunnelErrors, [id]: undefined } }));
+        await get().refreshTunnelStatus();
+      },
+
+      async saveTunnel(t) {
+        const wasRunning = !!get().tunnelStatus[t.id];
+        try {
+          await tunnelApi.save(t);
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+          return false;
+        }
+        await get().loadTunnels();
+        // Saving stops a running tunnel; bring it back with the new settings.
+        if (wasRunning) await get().startTunnel(t.id);
+        else await get().refreshTunnelStatus();
+        return true;
+      },
+
+      async deleteTunnel(id) {
+        await tunnelApi.remove(id);
+        await get().loadTunnels();
+        await get().refreshTunnelStatus();
+      },
+
+      async startAutoTunnels() {
+        await get().loadTunnels();
+        for (const t of get().tunnels.filter((x) => x.autoStart)) {
+          if (!(await get().startTunnel(t.id))) {
+            get().showToast(`Tunnel ${t.name} didn't start: ${get().tunnelErrors[t.id] ?? "cancelled"}`, "error");
+          }
+        }
+      },
+
+      openTunnelDialog: (editing) => set({ tunnelDialog: { open: true, editing } }),
+      closeTunnelDialog: () => set({ tunnelDialog: { open: false } }),
+
+      openTunnelsTab() {
+        const existing = get().tabs.find((t) => t.kind === "tunnels");
+        if (existing) return set({ activeTabId: existing.id });
+        const tab: TunnelsTab = { id: uid(), kind: "tunnels", title: "Tunnels" };
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
+      },
+
       async connect(connId) {
         const conn = get().connections.find((c) => c.id === connId);
         if (!conn) return false;
@@ -369,6 +520,7 @@ export const useApp = create<State>()(
           }));
           void get().loadSchemas(connId, conn.database);
           void get().loadCompletion(connId, conn.database);
+          if (conn.sshHostId) void get().refreshTunnelStatus();
           return true;
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -380,6 +532,7 @@ export const useApp = create<State>()(
 
       async disconnect(connId) {
         await api.disconnect(connId);
+        void get().refreshTunnelStatus();
         set((s) => {
           const cache = { ...s.cache };
           for (const k of Object.keys(cache)) if (k.startsWith(connId + "\u001f")) delete cache[k];

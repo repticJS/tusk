@@ -87,11 +87,14 @@ impl Sessions {
         }
     }
 
+    /// The session for `sref`, connecting if needed. `via` is the local port
+    /// of the connection's SSH tunnel, if it uses one.
     pub async fn get_or_open(
         &self,
         sref: &SessionRef,
         config: &ConnectionConfig,
         password: Option<String>,
+        via: Option<u16>,
     ) -> AppResult<Arc<Session>> {
         let key = sref.key();
         if let Some(s) = self.map.lock().await.get(&key) {
@@ -100,7 +103,7 @@ impl Sessions {
             }
         }
         // Connect without holding the lock so a slow server doesn't stall others.
-        let session = Arc::new(connect(config, &sref.database, password).await?);
+        let session = Arc::new(connect(config, &sref.database, password, via).await?);
         let mut map = self.map.lock().await;
         match map.get(&key) {
             Some(existing) if !existing.client.is_closed() => Ok(existing.clone()),
@@ -139,11 +142,17 @@ pub async fn connect(
     config: &ConnectionConfig,
     database: &str,
     password: Option<String>,
+    via: Option<u16>,
 ) -> AppResult<Session> {
     let mut pg = tokio_postgres::Config::new();
-    pg.host(&config.host)
-        .port(config.port)
-        .user(&config.user)
+    pg.host(&config.host);
+    match via {
+        // Through an SSH tunnel: connect to its local end, but keep the real
+        // host name for TLS verification.
+        Some(port) => pg.hostaddr(std::net::Ipv4Addr::LOCALHOST.into()).port(port),
+        None => pg.port(config.port),
+    };
+    pg.user(&config.user)
         .dbname(database)
         .application_name("Tusk")
         .connect_timeout(Duration::from_secs(10))
