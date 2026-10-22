@@ -22,3 +22,14 @@ export function fmtUptime(seconds: number) {
   if (h) return `${h}h ${m}m`;
   return `${m}m`;
 }
+
+/** "850 ms", "12 s", "3m 20s", "2h 5m", "3d 4h". */
+export function fmtDuration(seconds: number) {
+  if (seconds < 1) return `${Math.round(seconds * 1000)} ms`;
+  if (seconds < 60) return `${Math.floor(seconds)} s`;
+  const m = Math.floor(seconds / 60);
+  if (m < 60) return `${m}m ${Math.floor(seconds % 60)}s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}

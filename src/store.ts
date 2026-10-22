@@ -46,6 +46,15 @@ export interface TableTab {
   objKind: meta.RelKind;
 }
 
+/** Live sessions, locks and health of one database (pg_stat_activity…). */
+export interface ActivityTab {
+  id: string;
+  kind: "activity";
+  title: string;
+  connId: string;
+  database: string;
+}
+
 export interface TerminalTab {
   id: string;
   kind: "terminal";
@@ -103,7 +112,7 @@ export interface TunnelsTab {
 }
 
 /** Tabs bound to a database connection. */
-export type DbTab = QueryTab | TableTab;
+export type DbTab = QueryTab | TableTab | ActivityTab;
 export type Tab = DbTab | TerminalTab | LocalTab | RemoteFileTab | TunnelsTab | DiscoverTab;
 
 /** Tabs with a terminal in them. */
@@ -118,7 +127,8 @@ export interface MultiExec {
   tiled: boolean;
 }
 
-export const isDbTab = (t: Tab | undefined): t is DbTab => !!t && (t.kind === "query" || t.kind === "table");
+export const isDbTab = (t: Tab | undefined): t is DbTab =>
+  !!t && (t.kind === "query" || t.kind === "table" || t.kind === "activity");
 
 export interface FilePanelPrefs {
   open: boolean;
@@ -281,6 +291,7 @@ interface State {
 
   openQueryTab(connId: string, database: string, sql?: string, title?: string): string;
   openTableTab(connId: string, database: string, schema: string, name: string, kind: meta.RelKind): void;
+  openActivityTab(connId: string, database: string): void;
   updateTab(id: string, patch: Partial<QueryTab>): void;
   closeTab(id: string): void;
   /** Closes a tab, asking first if it has unsaved edits. */
@@ -306,7 +317,8 @@ export const metaSession = (connId: string, database: string): SessionRef => ({
 export const tabSession = (tab: DbTab): SessionRef => ({
   connId: tab.connId,
   database: tab.database,
-  purpose: tab.kind === "query" ? `tab:${tab.id}` : "meta",
+  // Query and activity tabs get their own connection; table tabs share "meta".
+  purpose: tab.kind === "query" ? `tab:${tab.id}` : tab.kind === "activity" ? `activity:${tab.id}` : "meta",
 });
 
 export const cacheKey = (connId: string, database: string) => `${connId}\u001f${database}`;
@@ -860,6 +872,15 @@ export const useApp = create<State>()(
         return id;
       },
 
+      openActivityTab(connId, database) {
+        const existing = get().tabs.find((t) => t.kind === "activity" && t.connId === connId && t.database === database);
+        if (existing) return set({ activeTabId: existing.id });
+        const conn = get().connections.find((c) => c.id === connId);
+        const title = `Activity: ${database === conn?.database ? (conn?.name ?? database) : database}`;
+        const tab: ActivityTab = { id: uid(), kind: "activity", title, connId, database };
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
+      },
+
       openTableTab(connId, database, schema, name, objKind) {
         const existing = get().tabs.find(
           (t) =>
@@ -879,7 +900,7 @@ export const useApp = create<State>()(
 
       closeTab(id) {
         const tab = get().tabs.find((t) => t.id === id);
-        if (tab?.kind === "query") void api.closeSession(tabSession(tab)).catch(() => {});
+        if (tab?.kind === "query" || tab?.kind === "activity") void api.closeSession(tabSession(tab)).catch(() => {});
         if (tab?.kind === "terminal") void sshApi.close(tab.id).catch(() => {});
         if (tab?.kind === "local") void localApi.close(tab.id).catch(() => {});
         set((s) => {

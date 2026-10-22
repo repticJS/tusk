@@ -5,7 +5,7 @@ import { fmtBytes, fmtUptime } from "../lib/format";
 
 const POLL_MS = 2000;
 /** Samples kept for the graphs: three minutes. */
-const HISTORY = 90;
+export const HISTORY = 90;
 
 interface Live {
   stats: ServerStats;
@@ -76,7 +76,7 @@ function useServerStats(termId: string, active: boolean) {
   return { live, unsupported };
 }
 
-function Meter({ value, width = 44 }: { value: number; width?: number }) {
+export function Meter({ value, width = 44 }: { value: number; width?: number }) {
   return (
     <span className="inline-block h-1.5 overflow-hidden rounded-full bg-border align-middle" style={{ width }}>
       <span
@@ -168,7 +168,7 @@ function Item({ label, children }: { label: string; children: ReactNode }) {
 }
 
 /** A small area chart. `max` fixes the scale (100 for percentages). */
-function Sparkline({ values, max, color, height = 40 }: { values: number[]; max?: number; color: string; height?: number }) {
+export function Sparkline({ values, max, color, height = 40 }: { values: number[]; max?: number; color: string; height?: number }) {
   const w = HISTORY - 1;
   const top = Math.max(max ?? 0, ...values, 1e-9);
   const pts = values.map((v, i) => `${w - (values.length - 1 - i)},${height - (v / top) * (height - 2) - 1}`);

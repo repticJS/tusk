@@ -22,6 +22,7 @@ Works with PostgreSQL 9.6 and newer (tested against 9.6, 10, 11 and 16).
 | Query editor | Multiple statements, run at cursor or selection or all, cancel, EXPLAIN / EXPLAIN ANALYZE, notices, row limit, open and save `.sql` files |
 | Results | Multiple result sets, messages log, value panel with pretty JSON, find (Ctrl+F), copy cells |
 | Export | CSV (Excel-friendly), JSON, TSV to clipboard, INSERT statements |
+| Activity | Live dashboard per database (right-click a connection → *Activity & sessions*): connections, transactions per second, cache hit rate, sessions with their queries and run time, who is blocking whom, cancel a query or terminate a session, replicas, and table health (dead rows, scans, last vacuum) |
 | Everywhere | Command palette (Ctrl+P), query history, dark and light theme, tabs restored on restart |
 
 ### SSH terminals

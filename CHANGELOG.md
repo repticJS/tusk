@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+- Activity dashboard: right-click a connection or database → Activity & sessions. Live connections, transactions per second, cache hit rate, and every session with its query and how long it's been running.
+- See which sessions are waiting on locks and which session is blocking them; cancel a query or terminate a session from the dashboard.
+- Replica status and table health (dead rows, full table scans, last vacuum and analyze).
+
 ## 0.7.0
 
 - Share folders: right-click a folder → Share folder… to send its connections, SSH hosts and tunnels as a share code or .tusk file. Import with + → Import shared folder….

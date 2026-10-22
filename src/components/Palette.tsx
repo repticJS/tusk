@@ -1,4 +1,4 @@
-import { ArrowUpCircle, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radar, Radio } from "lucide-react";
+import { Activity, ArrowUpCircle, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radar, Radio } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { formatDuration } from "../lib/sql";
@@ -94,6 +94,14 @@ export function CommandPalette() {
     for (const c of state.connections) {
       if (state.status[c.id]?.state !== "connected") {
         out.push({ id: `connect-${c.id}`, icon: <Database size={14} />, label: `Connect: ${c.name}`, run: () => void state.connect(c.id) });
+      if (state.status[c.id]?.state === "connected") {
+        out.push({
+          id: `activity-${c.id}`,
+          icon: <Activity size={14} />,
+          label: `Activity: ${c.name}`,
+          run: () => state.openActivityTab(c.id, c.database),
+        });
+      }
         continue;
       }
       for (const db of state.databases[c.id] ?? []) {

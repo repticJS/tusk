@@ -1,4 +1,5 @@
 import {
+  Activity,
   ChevronRight,
   FolderClosed,
   FolderInput,
@@ -656,6 +657,11 @@ function ConnectionNode({ conn, ...p }: NodeProps & { conn: ConnectionConfig }) 
       : { label: "Connect", icon: <Plug size={13} />, onClick: () => void activate() },
     { label: "New query", icon: <SquareTerminal size={13} />, hint: "Ctrl+T", onClick: () => openQueryTab(conn.id, conn.database) },
     {
+      label: "Activity & sessions",
+      icon: <Activity size={13} />,
+      onClick: () => useApp.getState().openActivityTab(conn.id, conn.database),
+    },
+    {
       label: "Refresh",
       icon: <RefreshCw size={13} />,
       disabled: status?.state !== "connected",
@@ -789,6 +795,11 @@ function DatabaseNode({ conn, database, ...p }: NodeProps & { conn: ConnectionCo
         onContextMenu={(e) =>
           p.openMenu(e, [
             { label: "New query", icon: <SquareTerminal size={13} />, onClick: () => openQueryTab(conn.id, database) },
+            {
+              label: "Activity & sessions",
+              icon: <Activity size={13} />,
+              onClick: () => useApp.getState().openActivityTab(conn.id, database),
+            },
             { label: "Refresh", icon: <RefreshCw size={13} />, onClick: () => void refresh(conn.id, database) },
           ])
         }

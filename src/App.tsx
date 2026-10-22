@@ -1,4 +1,5 @@
 import {
+  Activity,
   Database,
   FileCode2,
   LayoutGrid,
@@ -28,6 +29,7 @@ import { RemoteFileTab } from "./components/RemoteFileTab";
 import { TerminalTab } from "./components/TerminalTab";
 import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
 import { DiscoverTab } from "./components/DiscoverTab";
+import { ActivityTab } from "./components/ActivityTab";
 import { ImportDialog, ShareDialog } from "./components/ShareDialogs";
 import { UpdateChip, UpdateDialog, useUpdateChecks } from "./components/Updater";
 import { Modal, useMenu } from "./components/ui";
@@ -161,6 +163,8 @@ export default function App() {
                     <QueryTab tab={t} active={t.id === activeTabId} />
                   ) : t.kind === "table" ? (
                     <TableTab tab={t} active={t.id === activeTabId} />
+                  ) : t.kind === "activity" ? (
+                    <ActivityTab tab={t} active={t.id === activeTabId} />
                   ) : isTermTab(t) ? (
                     <TerminalTab tab={t} active={t.id === activeTabId} tiled={tiled} />
                   ) : t.kind === "tunnels" ? (
@@ -265,6 +269,8 @@ function TabBar() {
                   <SquareTerminal size={13} />
                 ) : t.kind === "table" ? (
                   <Table2 size={13} />
+                ) : t.kind === "activity" ? (
+                  <Activity size={13} />
                 ) : t.kind === "terminal" ? (
                   <TerminalSquare size={13} />
                 ) : t.kind === "tunnels" ? (
