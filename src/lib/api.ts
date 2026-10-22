@@ -476,11 +476,33 @@ export interface Pm2Info {
 
 export type Pm2Action = "start" | "stop" | "restart" | "reload" | "delete" | "flush" | "reset" | "save" | "resurrect";
 
+export interface Service {
+  /** Without ".service". */
+  name: string;
+  description: string;
+  /** active | inactive | failed | activating | deactivating */
+  active: string;
+  /** running | exited | dead | failed | … */
+  sub: string;
+  /** enabled | disabled | static | masked | … */
+  enabled?: string | null;
+}
+
+export interface ServicesInfo {
+  /** How actions can run: root | sudo (no password) | none */
+  privilege: "root" | "sudo" | "none";
+  units: Service[];
+}
+
+export type ServiceAction = "start" | "stop" | "restart" | "reload" | "enable" | "disable";
+
 export interface ScanResult {
   os: string;
   databases: FoundDb[];
   docker: DockerInfo;
   pm2: Pm2Info;
+  /** null when the machine doesn't run systemd. */
+  services?: ServicesInfo | null;
 }
 
 export type ContainerAction = "start" | "stop" | "restart";
@@ -492,6 +514,15 @@ export const discoverApi = {
   /** hostId null means this PC. */
   docker: (hostId: string | null, command: string, action: ContainerAction, id: string) =>
     withSshPrompts(() => call<void>("docker_action", { hostId, command, action, id })),
+};
+
+/** systemd on an SSH host, or this PC when hostId is null. */
+export const systemdApi = {
+  action: (hostId: string | null, action: ServiceAction, unit: string) =>
+    withSshPrompts(() => call<void>("systemd_action", { hostId, action, unit })),
+  /** Command for a terminal: the service's journal, or an action with interactive sudo. */
+  terminal: (kind: "logs" | "action", unit: string, action?: ServiceAction) =>
+    call<string>("systemd_terminal", { kind, unit, action: action ?? null }),
 };
 
 /** PM2 on an SSH host, or this PC when hostId is null. */

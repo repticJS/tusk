@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.0
+
+- Services: Discover lists each server's systemd services, failed first. Start, stop, restart, reload, enable or disable them, and follow their logs (journal) in a terminal.
+- When an action needs your sudo password, Tusk opens a terminal for it.
+- SSH terminals show failed services in their header.
+
 ## 0.10.0
 
 - Saved commands: save deploys, restarts and other scripts and run them on one or many servers at once, with live output from each, exit codes, cancel, and "run again where it failed".

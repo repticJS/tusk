@@ -825,6 +825,57 @@ async fn docker_action(
     }
 }
 
+// ---- systemd ----
+
+/// start / stop / restart / reload / enable / disable a service on a host
+/// (or this PC when host_id is None). Fails with kind SUDO_REQUIRED when it
+/// needs a password, so the UI can offer a terminal instead.
+#[tauri::command]
+async fn systemd_action(
+    state: State<'_, AppState>,
+    host_id: Option<String>,
+    action: String,
+    unit: String,
+) -> AppResult<()> {
+    let script = discover::systemd_script(&action, &unit)?;
+    let (ok, out) = match host_id {
+        Some(h) => {
+            let creds = state.ssh_creds(&h)?;
+            let (out, status) = state.tunnels.exec(creds, &ssh::posix(&script), SCAN_TIMEOUT).await?;
+            (status == Some(0), out)
+        }
+        None => {
+            let out = tokio::task::spawn_blocking(move || std::process::Command::new("sh").arg("-c").arg(script).output())
+                .await
+                .map_err(|e| AppError::msg(e.to_string()))??;
+            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&out.stderr));
+            (out.status.success(), text)
+        }
+    };
+    if ok {
+        return Ok(());
+    }
+    let lower = out.to_lowercase();
+    if ["password is required", "interactive authentication required", "access denied", "not in the sudoers", "sudo:"]
+        .iter()
+        .any(|p| lower.contains(p))
+    {
+        return Err(AppError::kind("SUDO_REQUIRED", "This needs root. Run it in a terminal to enter your sudo password."));
+    }
+    Err(AppError::msg(out.trim().lines().last().unwrap_or("systemctl failed").to_string()))
+}
+
+/// The command a terminal tab runs: the journal of a service ("logs"), or an
+/// action done with interactive sudo.
+#[tauri::command]
+fn systemd_terminal(kind: String, unit: String, action: Option<String>) -> AppResult<String> {
+    match kind.as_str() {
+        "logs" => discover::journal_command(&unit),
+        _ => discover::systemd_terminal_command(action.as_deref().unwrap_or(""), &unit),
+    }
+}
+
 // ---- PM2 ----
 
 /// Runs a PM2 script on a host (or this PC when host_id is None) and returns
@@ -1005,6 +1056,8 @@ pub fn run() {
             discover_terminal,
             docker_action,
             pm2_list,
+            systemd_action,
+            systemd_terminal,
             pm2_action,
             pm2_start,
             pm2_terminal,

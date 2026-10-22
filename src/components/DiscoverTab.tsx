@@ -17,6 +17,7 @@ import type { ContainerInfo, FoundDb, ScanResult, SshHost } from "../lib/api";
 import { blankConnection, blankTunnel } from "../lib/defaults";
 import { useApp, type DiscoverTab as DiscoverTabModel, type ScanState } from "../store";
 import { Pm2Section } from "./Pm2Section";
+import { ServicesSection } from "./ServicesSection";
 import { Spinner } from "./ui";
 
 export const DB_LABELS: Record<string, string> = {
@@ -108,7 +109,7 @@ export function DiscoverTab({ active }: { tab: DiscoverTabModel; active: boolean
           <div className="flex-1">
             <div className="text-[17px] font-semibold tracking-tight">Discover</div>
             <div className="text-[12.5px] text-muted">
-              Databases, Docker containers and PM2 apps on this PC and your SSH servers. SSH servers are scanned when you open
+              Databases, Docker containers, PM2 apps and services on this PC and your SSH servers. SSH servers are scanned when you open
               a terminal to them.
             </div>
           </div>
@@ -225,6 +226,7 @@ function Findings({ target, host, result }: { target: string; host?: SshHost; re
         </div>
       )}
       <Pm2Section target={target} pm2={result.pm2} windows={local && result.os === "Windows"} />
+      {result.services && <ServicesSection target={target} services={result.services} />}
     </div>
   );
 }

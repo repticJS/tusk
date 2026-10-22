@@ -42,6 +42,10 @@ Open PowerShell, Command Prompt, Git Bash or any WSL distro in a tab from the mo
 
 **Multi-exec** (the antenna button in any terminal's header) sends what you type to several terminals at once, SSH and local alike. Tick which ones take part, and use **Tile** to see them side by side.
 
+### Services (systemd)
+
+Each server's Discover card lists its systemd services, failed ones first, with their description, state and whether they start at boot. Start, stop, restart, reload, enable or disable them, or open a service's journal (`journalctl -f`) in a terminal tab. Actions run as root or through `sudo` without a password; when sudo needs a password, Tusk opens a terminal so you can type it. SSH terminals mention failed services in their header.
+
 ### Saved commands
 
 Save the commands you run all the time — a deploy like `cd ~/apps/api && git pull && npm ci && pm2 reload api`, a restart, a cleanup — and run them on one server or several at once (**+** → **New command…**, right-click a host or folder, the ⚡ menu in a terminal, or **Commands** in the palette). Each server's output streams live in its own pane with exit status and time; failures can be re-run on just the servers that failed, and **Cancel** really stops the command on the server. Scripts run under `sh` in your home folder, stop at the first failing line unless you untick that, find Node tools installed with nvm, and ask before running unless you say otherwise. Commands travel with shared folders.

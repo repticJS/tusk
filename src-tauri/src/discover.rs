@@ -78,6 +78,31 @@ pub struct ScanResult {
     pub databases: Vec<FoundDb>,
     pub docker: Docker,
     pub pm2: crate::pm2::Pm2,
+    /// None when the machine doesn't run systemd.
+    pub services: Option<Services>,
+}
+
+/// A systemd service.
+#[derive(Serialize, Debug, Default, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Service {
+    /// Without ".service".
+    pub name: String,
+    pub description: String,
+    /// active | inactive | failed | activating | deactivating
+    pub active: String,
+    /// running | exited | dead | failed | …
+    pub sub: String,
+    /// enabled | disabled | static | masked | … (None when unknown)
+    pub enabled: Option<String>,
+}
+
+#[derive(Serialize, Debug, Default, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Services {
+    /// How actions can run: root | sudo (without a password) | none
+    pub privilege: String,
+    pub units: Vec<Service>,
 }
 
 const BASE_SCRIPT: &str = r#"export LC_ALL=C
@@ -102,7 +127,13 @@ if [ -n "$D" ]; then
   echo @docker_ps; $D ps -a --no-trunc --format '{{json .}}' 2>/dev/null
   ids=$($D ps -aq 2>/dev/null)
   if [ -n "$ids" ]; then echo @docker_inspect; $D inspect $ids 2>/dev/null; fi
-elif ! command -v docker >/dev/null 2>&1 && ! command -v podman >/dev/null 2>&1; then echo @docker_missing; fi"#;
+elif ! command -v docker >/dev/null 2>&1 && ! command -v podman >/dev/null 2>&1; then echo @docker_missing; fi
+if command -v systemctl >/dev/null 2>&1 && systemctl list-units --type=service --no-legend --plain --no-pager >/dev/null 2>&1; then
+  echo @systemd_units; systemctl list-units --type=service --all --no-legend --plain --no-pager 2>/dev/null
+  echo @systemd_files; systemctl list-unit-files --type=service --no-legend --no-pager 2>/dev/null
+  echo @systemd_privilege
+  if [ "$(id -u)" = 0 ]; then echo root; elif sudo -n -l systemctl >/dev/null 2>&1; then echo sudo; else echo none; fi
+fi"#;
 
 /// The whole scan: databases, containers and PM2 apps.
 pub fn scan_script() -> String {
@@ -528,7 +559,85 @@ pub fn parse_scan(text: &str) -> ScanResult {
         databases: found.into_values().collect(),
         docker,
         pm2: crate::pm2::parse(&s),
+        services: parse_services(&s),
     }
+}
+
+// ---- systemd ----
+
+/// `systemctl list-units --all --plain` plus `list-unit-files` for the
+/// enabled state.
+fn parse_services(s: &HashMap<String, Vec<&str>>) -> Option<Services> {
+    let units = s.get("systemd_units")?;
+    let enabled: HashMap<&str, &str> = s
+        .get("systemd_files")
+        .into_iter()
+        .flatten()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            Some((f.next()?, f.next()?))
+        })
+        .collect();
+    let mut list: Vec<Service> = units
+        .iter()
+        .filter_map(|l| {
+            // UNIT LOAD ACTIVE SUB DESCRIPTION…; failed units may start with "●".
+            let l = l.trim_start().trim_start_matches('●').trim_start();
+            let mut f = l.split_whitespace();
+            let (unit, load, active, sub) = (f.next()?, f.next()?, f.next()?, f.next()?);
+            let name = unit.strip_suffix(".service")?;
+            if load == "not-found" || name.ends_with('@') {
+                return None;
+            }
+            // A templated unit's state is filed under "name@.service".
+            let template = name.split_once('@').map(|(base, _)| format!("{base}@.service"));
+            let state = enabled.get(unit).or_else(|| template.as_deref().and_then(|t| enabled.get(t)));
+            Some(Service {
+                name: name.to_string(),
+                description: f.collect::<Vec<_>>().join(" "),
+                active: active.to_string(),
+                sub: sub.to_string(),
+                enabled: state.map(|e| e.to_string()),
+            })
+        })
+        .collect();
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    let privilege = s.get("systemd_privilege").and_then(|l| l.first()).map(|p| p.trim().to_string()).unwrap_or_else(|| "none".into());
+    Some(Services { privilege, units: list })
+}
+
+pub fn valid_unit(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 200 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-' | ':'))
+}
+
+/// `systemctl <action> <unit>`, as root or through sudo without a password.
+pub fn systemd_script(action: &str, unit: &str) -> AppResult<String> {
+    if !matches!(action, "start" | "stop" | "restart" | "reload" | "enable" | "disable") {
+        return Err(AppError::msg(format!("Unknown service action {action}")));
+    }
+    if !valid_unit(unit) {
+        return Err(AppError::msg("Invalid service name"));
+    }
+    Ok(format!(
+        "u={unit}.service\nif [ \"$(id -u)\" = 0 ]; then systemctl {action} \"$u\"; else sudo -n systemctl {action} \"$u\"; fi 2>&1"
+    ))
+}
+
+/// What a terminal runs to follow a service's journal (with sudo when the
+/// user can't read the system journal).
+pub fn journal_command(unit: &str) -> AppResult<String> {
+    if !valid_unit(unit) {
+        return Err(AppError::msg("Invalid service name"));
+    }
+    Ok(crate::ssh::posix(&format!(
+        "if [ \"$(id -u)\" = 0 ] || id -nG | grep -qwE 'systemd-journal|adm'; then exec journalctl -u {unit}.service -n 200 -f; else exec sudo journalctl -u {unit}.service -n 200 -f; fi"
+    )))
+}
+
+/// The same action in a terminal, so sudo can ask for a password.
+pub fn systemd_terminal_command(action: &str, unit: &str) -> AppResult<String> {
+    systemd_script(action, unit)?;
+    Ok(crate::ssh::posix(&format!("sudo systemctl {action} {unit}.service && echo 'Done: {action} {unit}'")))
 }
 
 // ---- running scans and container actions ----
@@ -791,6 +900,44 @@ docker
         assert!(docker_command("docker", "rm", "x").is_err());
         assert!(docker_command("docker", "stop", "x; rm -rf /").is_err());
         assert!(docker_command("bash -c", "stop", "x").is_err());
+    }
+
+    #[test]
+    fn parses_systemd_services() {
+        let text = "@systemd_units
+cron.service                 loaded    active   running Regular background program processing daemon
+● nginx.service              loaded    failed   failed  A high performance web server and a reverse proxy server
+postgresql@16-main.service   loaded    active   running PostgreSQL Cluster 16-main
+backup.service               loaded    inactive dead    Nightly backup
+gone.service                 not-found inactive dead    gone.service
+@systemd_files
+cron.service                           enabled         enabled
+nginx.service                          enabled         enabled
+postgresql@.service                    indirect        enabled
+backup.service                         disabled        enabled
+@systemd_privilege
+sudo
+";
+        let s = parse_services(&sections(text)).unwrap();
+        assert_eq!(s.privilege, "sudo");
+        let names: Vec<&str> = s.units.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(names, ["backup", "cron", "nginx", "postgresql@16-main"]);
+        let nginx = &s.units[2];
+        assert_eq!((nginx.active.as_str(), nginx.sub.as_str(), nginx.enabled.as_deref()), ("failed", "failed", Some("enabled")));
+        assert_eq!(nginx.description, "A high performance web server and a reverse proxy server");
+        assert_eq!(s.units[3].enabled.as_deref(), Some("indirect"));
+        assert_eq!(s.units[0].enabled.as_deref(), Some("disabled"));
+        assert!(parse_services(&sections("@os\nx\n")).is_none());
+    }
+
+    #[test]
+    fn service_actions_are_checked() {
+        let s = systemd_script("restart", "nginx").unwrap();
+        assert!(s.contains("systemctl restart \"$u\"") && s.starts_with("u=nginx.service"), "{s}");
+        assert!(systemd_script("mask", "nginx").is_err());
+        assert!(systemd_script("stop", "nginx; reboot").is_err());
+        assert!(journal_command("a b").is_err());
+        assert!(journal_command("postgresql@16-main").unwrap().contains("journalctl -u postgresql@16-main.service"));
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import {
   api,
+  DbError,
   folderApi,
   localApi,
   sshApi,
@@ -11,6 +12,7 @@ import {
   discoverApi,
   monitorApi,
   pm2Api,
+  systemdApi,
   type AppErrorInfo,
   type ContainerAction,
   type ContainerInfo,
@@ -20,6 +22,7 @@ import {
   type MonitorSettings,
   type MonitorView,
   type Pm2Action,
+  type ServiceAction,
   type SavedCommand,
   type ScanResult,
   type SessionRef,
@@ -332,6 +335,9 @@ interface State {
   pm2Action(target: string, action: Pm2Action, app?: string, label?: string): Promise<boolean>;
   pm2Start(target: string, app: { script: string; name: string; cwd: string; instances: number }): Promise<boolean>;
   pm2Terminal(target: string, kind: "logs" | "monit", app?: { id: number; name: string }): Promise<void>;
+  /** Runs a systemd action; when it needs a sudo password, offers a terminal instead. */
+  serviceAction(target: string, unit: string, action: ServiceAction): Promise<void>;
+  serviceTerminal(target: string, unit: string, kind: "logs" | "action", action?: ServiceAction): Promise<void>;
   openDiscoverTab(focus?: string): void;
   loadMonitor(): Promise<void>;
   saveMonitor(patch: Partial<MonitorSettings>): Promise<void>;
@@ -935,6 +941,37 @@ export const useApp = create<State>()(
         if (existing) return set({ activeTabId: existing.id });
         const tab: MonitorTab = { id: uid(), kind: "monitor", title: "Monitoring" };
         set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
+      },
+
+      async serviceAction(target, unit, action) {
+        const done: Record<ServiceAction, string> = {
+          start: "started",
+          stop: "stopped",
+          restart: "restarted",
+          reload: "reloaded",
+          enable: "enabled",
+          disable: "disabled",
+        };
+        try {
+          await systemdApi.action(target === "local" ? null : target, action, unit);
+          get().showToast(`${unit}: ${done[action]}`, "ok");
+        } catch (e) {
+          if (e instanceof DbError && e.info.kind === "SUDO_REQUIRED" && target !== "local") {
+            // Let sudo ask for the password in a terminal.
+            get().showToast(`${unit} needs your sudo password: opening a terminal`, "info");
+            await get().serviceTerminal(target, unit, "action", action);
+            return;
+          }
+          get().showToast(`${unit}: ${e instanceof Error ? e.message : String(e)}`, "error");
+        }
+        await get().scan(target);
+      },
+
+      async serviceTerminal(target, unit, kind, action) {
+        const cmd = await systemdApi.terminal(kind, unit, action);
+        const title = kind === "logs" ? `journal: ${unit}` : `${action} ${unit}`;
+        if (target === "local") get().openLocalTerminal(undefined, { title, command: ["sh", "-c", cmd] });
+        else get().openTerminalTab(target, { title, command: cmd });
       },
 
       openDiscoverTab(focus) {

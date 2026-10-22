@@ -89,8 +89,9 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
             dbs: r.databases.length + r.docker.containers.filter((c) => c.dbKind).length,
             containers: r.docker.containers.length,
             apps: r.pm2.processes.length,
+            failed: r.services?.units.filter((u) => u.active === "failed").length ?? 0,
           }
-        : { dbs: -1, containers: -1, apps: -1 };
+        : { dbs: -1, containers: -1, apps: -1, failed: 0 };
     }),
   );
   const theme = useApp((s) => s.theme);
@@ -404,7 +405,7 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
         <span className="truncate text-faint">{target}</span>
         {state === "connecting" && <Spinner size={11} />}
         <div className="flex-1" />
-        {(found.dbs > 0 || found.containers > 0 || found.apps > 0) && (
+        {(found.dbs > 0 || found.containers > 0 || found.apps > 0 || found.failed > 0) && (
           <button
             className="flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-px text-[11px] text-muted hover:text-text"
             title="Databases, containers and PM2 apps on this server"
@@ -415,6 +416,7 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
               found.dbs > 0 && `${found.dbs} database${found.dbs === 1 ? "" : "s"}`,
               found.containers > 0 && `${found.containers} container${found.containers === 1 ? "" : "s"}`,
               found.apps > 0 && `${found.apps} PM2 app${found.apps === 1 ? "" : "s"}`,
+              found.failed > 0 && `${found.failed} failed service${found.failed === 1 ? "" : "s"}`,
             ]
               .filter(Boolean)
               .join(" · ")}
