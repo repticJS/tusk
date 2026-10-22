@@ -64,9 +64,9 @@ The status bar shows how many problems there are, hosts with problems get a warn
 
 ### Sharing folders
 
-Right-click a folder → **Share folder…** to hand its connections, SSH hosts, FTP sites and tunnels (with subfolders, and any SSH hosts its connections go through) to a teammate as a share code or a `.tusk` file. They import it with **+** → **Import shared folder…** and get their own copy; nothing in their sidebar is overwritten.
+Right-click a folder → **Share folder…** to hand its connections, SSH hosts, FTP sites, remote desktops and tunnels (with subfolders, and any SSH hosts its connections go through) to a teammate as a share code or a `.tusk` file. They import it with **+** → **Import shared folder…** and get their own copy; nothing in their sidebar is overwritten.
 
-Passwords, SSH and FTP passwords and private key files are left out unless you tick **Include passwords and keys**. Then the share is encrypted with a passphrase you choose (Argon2id + XChaCha20-Poly1305); send the passphrase separately. Imported passwords go to Windows Credential Manager and key files to Tusk's own folder, readable only by you.
+Passwords (database, SSH, FTP and remote desktop) and private key files are left out unless you tick **Include passwords and keys**. Then the share is encrypted with a passphrase you choose (Argon2id + XChaCha20-Poly1305); send the passphrase separately. Imported passwords go to Windows Credential Manager and key files to Tusk's own folder, readable only by you.
 
 ### Discover databases and containers
 
@@ -119,6 +119,19 @@ A FileZilla-style **Files** tab (folder button at the top of the sidebar, right-
 
 FTP sites can go in folders and be shared like SSH hosts; their passwords are only included in encrypted shares.
 
+### Remote desktop (RDP)
+
+Connect to Windows PCs and servers (and Linux machines running xrdp) inside a Tusk tab: + → **New remote desktop**, or **Remote desktop** in any new-connection dialog. Connections live in the sidebar next to everything else, go in folders and are shared like SSH hosts.
+
+| Area | What's there |
+|---|---|
+| Sign-in | User, domain and password saved in Windows Credential Manager (or asked each time), Network Level Authentication, a prompt when the password is wrong |
+| Security | The computer's certificate is checked the first time you connect, like SSH host keys, and you're warned if it changes. The password is only sent after that |
+| Display | Fit the tab (the remote screen follows the tab's size and your display scaling) or a fixed size that shrinks to fit or scrolls; 32- or 16-bit colour; best looking or fastest; full screen with a bar at the top edge |
+| Extras | Sound plays on this PC, clipboard shared both ways (Windows), **Send keys** for Ctrl+Alt+Del, the Windows key, Alt+Tab and others the PC keeps for itself |
+
+Keys typed in a remote desktop go to it, except Ctrl+Shift+W / T / P, which stay with Tusk as in terminals.
+
 ### Shortcuts
 
 | Keys | Action |
@@ -167,6 +180,7 @@ src-tauri/src/
   stats.rs     server performance stats over a terminal's connection (/proc, df)
   sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
   files.rs     file manager: SFTP / FTP / FTPS sessions, local folders, queued transfers
+  rdp.rs       remote desktop sessions (IronRDP): certificates, sign-in, screen updates, input
   monitor.rs   background checks of SSH hosts, problems and alerts
   share.rs     folder share codes: collecting, encryption, importing with new ids
   pm2.rs       PM2 apps: listing (pm2 jlist), actions, new apps, logs/monit terminals
@@ -180,7 +194,7 @@ src/
   lib/meta.ts  catalog introspection queries, DDL generation
   lib/sql.ts   statement splitter, quoting, formatting, export helpers
   store.ts     app state (zustand)
-  components/  Sidebar, QueryTab, TableTab, TerminalTab (xterm.js), SftpPanel, FilesTab, RemoteFileTab, TunnelsTab, DataGrid (Glide), SqlEditor (CodeMirror), dialogs
+  components/  Sidebar, QueryTab, TableTab, TerminalTab (xterm.js), SftpPanel, FilesTab, RdpTab, RemoteFileTab, TunnelsTab, DataGrid (Glide), SqlEditor (CodeMirror), dialogs
 ```
 
 ## Roadmap ideas

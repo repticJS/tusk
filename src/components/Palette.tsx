@@ -1,4 +1,4 @@
-import { Activity, ArrowUpCircle, BellRing, FolderSync, Server, Zap, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radar, Radio } from "lucide-react";
+import { Activity, ArrowUpCircle, BellRing, FolderSync, Server, ScreenShare, Zap, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radar, Radio } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { formatDuration } from "../lib/sql";
@@ -56,6 +56,15 @@ export function CommandPalette() {
     out.push({ id: "monitor", icon: <BellRing size={14} />, label: "Monitoring", run: () => state.openMonitorTab() });
     out.push({ id: "commands", icon: <Zap size={14} />, label: "Commands", run: () => state.openCommandsTab() });
     out.push({ id: "files", icon: <FolderSync size={14} />, label: "File manager", run: () => state.openFilesTab() });
+    for (const r of state.rdpConnections) {
+      out.push({
+        id: `rdp-${r.id}`,
+        icon: <ScreenShare size={14} />,
+        label: `Remote desktop: ${r.name}`,
+        detail: r.host,
+        run: () => state.openRdpTab(r.id),
+      });
+    }
     for (const f of state.ftpSites) {
       out.push({
         id: `ftp-${f.id}`,

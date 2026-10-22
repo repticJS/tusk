@@ -13,6 +13,7 @@ function describe(c: ShareCounts) {
       part(c.connections, "database connection", "database connections"),
       part(c.sshHosts, "SSH host", "SSH hosts"),
       part(c.ftpSites ?? 0, "FTP site", "FTP sites"),
+      part(c.remoteDesktops ?? 0, "remote desktop", "remote desktops"),
       part(c.tunnels, "tunnel", "tunnels"),
       part(c.commands ?? 0, "saved command", "saved commands"),
       part(c.folders - 1, "subfolder", "subfolders"),
@@ -46,7 +47,7 @@ export function ShareDialog() {
   }, [folderId]);
 
   if (!folderId) return null;
-  const secretCount = info ? info.passwords + info.ftpPasswords + info.sshSecrets + info.keyFiles : 0;
+  const secretCount = info ? info.passwords + info.ftpPasswords + info.rdpPasswords + info.sshSecrets + info.keyFiles : 0;
   const passProblem = !withSecrets
     ? null
     : pass.length < 8
@@ -140,6 +141,7 @@ export function ShareDialog() {
                     ? [
                         info.passwords && `${info.passwords} database password${info.passwords === 1 ? "" : "s"}`,
                         info.ftpPasswords && `${info.ftpPasswords} FTP password${info.ftpPasswords === 1 ? "" : "s"}`,
+                        info.rdpPasswords && `${info.rdpPasswords} remote desktop password${info.rdpPasswords === 1 ? "" : "s"}`,
                         info.sshSecrets && `${info.sshSecrets} SSH password${info.sshSecrets === 1 ? "" : "s"} or passphrase${info.sshSecrets === 1 ? "" : "s"}`,
                         info.keyFiles && `${info.keyFiles} private key file${info.keyFiles === 1 ? "" : "s"}`,
                       ]

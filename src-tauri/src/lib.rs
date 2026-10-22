@@ -5,6 +5,7 @@ mod files;
 mod local;
 mod monitor;
 mod pm2;
+mod rdp;
 mod share;
 mod sftp;
 mod ssh;
@@ -17,7 +18,7 @@ use ssh::{SshConfig, SshSessions};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use error::{AppError, AppResult};
 use std::sync::Mutex;
-use store::{ConnectionConfig, Folder, FtpSite, ItemRef, Store, TunnelConfig};
+use store::{ConnectionConfig, Folder, FtpSite, ItemRef, RdpConfig, Store, TunnelConfig};
 use tauri::{Emitter, Manager, State};
 
 struct AppState {
@@ -26,6 +27,7 @@ struct AppState {
     ssh: SshSessions,
     transfers: sftp::Transfers,
     files: files::FileSessions,
+    rdp: std::sync::Arc<rdp::RdpSessions>,
     tunnels: std::sync::Arc<tunnel::Tunnels>,
     local: local::LocalTerms,
     /// Shells found on this PC, detected once.
@@ -70,6 +72,13 @@ impl AppState {
         };
         let creds = self.ssh_creds(host_id)?;
         Ok(Some(self.tunnels.db_port(tunnel_id, &config.host, config.port, creds).await?))
+    }
+
+    fn rdp_password(&self, id: &str) -> Option<String> {
+        if let Some(p) = self.rdp.passwords.lock().unwrap().get(id) {
+            return Some(p.clone());
+        }
+        self.store.lock().unwrap().get_rdp_password(id)
     }
 
     fn ftp_password(&self, site_id: &str) -> Option<String> {
@@ -464,6 +473,11 @@ impl AppState {
                 s.ftp.insert(f.id.clone(), p);
             }
         }
+        for r in &b.remote_desktops {
+            if let Some(p) = self.rdp_password(&r.id) {
+                s.rdp.insert(r.id.clone(), p);
+            }
+        }
         s
     }
 }
@@ -479,6 +493,7 @@ fn share_info(state: State<'_, AppState>, folder_id: String) -> AppResult<share:
         extra_hosts: extra,
         passwords: secrets.passwords.len(),
         ftp_passwords: secrets.ftp.len(),
+        rdp_passwords: secrets.rdp.len(),
         ssh_secrets: secrets.ssh.len(),
         key_files: secrets.keys.len(),
     })
@@ -970,6 +985,97 @@ async fn local_delete(paths: Vec<String>) -> AppResult<()> {
     blocking(move || files::local_delete(&paths)).await
 }
 
+// ---- remote desktop ----
+
+#[tauri::command]
+fn list_rdp(state: State<'_, AppState>) -> Vec<RdpConfig> {
+    state.store.lock().unwrap().list_rdp()
+}
+
+/// Saves a remote desktop. `password` of None leaves a stored one alone.
+#[tauri::command]
+fn save_rdp(state: State<'_, AppState>, config: RdpConfig, password: Option<String>) -> AppResult<()> {
+    let id = config.id.clone();
+    let save = config.save_password;
+    let store = &mut state.store.lock().unwrap();
+    store.upsert_rdp(config)?;
+    if !save {
+        store.set_rdp_password(&id, None)?;
+        if let Some(p) = password {
+            state.rdp.passwords.lock().unwrap().insert(id, p);
+        }
+    } else if let Some(p) = password.as_deref() {
+        store.set_rdp_password(&id, Some(p))?;
+        state.rdp.passwords.lock().unwrap().remove(&id);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_rdp(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.rdp.passwords.lock().unwrap().remove(&id);
+    state.store.lock().unwrap().delete_rdp(&id)
+}
+
+/// Remembers a password typed at a prompt; `save` also stores it.
+#[tauri::command]
+fn set_rdp_password(state: State<'_, AppState>, id: String, password: String, save: bool) -> AppResult<()> {
+    if save {
+        let store = &mut state.store.lock().unwrap();
+        let config = store.get_rdp(&id)?;
+        store.upsert_rdp(RdpConfig { save_password: true, ..config })?;
+        store.set_rdp_password(&id, Some(&password))?;
+    }
+    state.rdp.passwords.lock().unwrap().insert(id, password);
+    Ok(())
+}
+
+/// Connects a remote desktop tab. Fails with RDP_PASSWORD_REQUIRED,
+/// RDP_AUTH_FAILED, RDP_CERT_UNKNOWN or RDP_CERT_CHANGED when the user
+/// needs to be asked something.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn rdp_open(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    conn_id: String,
+    width: u16,
+    height: u16,
+    scale: u32,
+    accept_fingerprint: Option<String>,
+    events: Channel<InvokeResponseBody>,
+) -> AppResult<()> {
+    let (config, known_hosts) = {
+        let store = state.store.lock().unwrap();
+        (store.get_rdp(&conn_id)?, store.rdp_known_path())
+    };
+    let password = state.rdp_password(&conn_id);
+    let req = rdp::OpenRequest { session_id, config, password, accept_fingerprint, width, height, scale, known_hosts };
+    rdp::open(app, state.rdp.clone(), req, events).await
+}
+
+#[tauri::command]
+fn rdp_input(state: State<'_, AppState>, session_id: String, events: Vec<rdp::InputEvent>) {
+    state.rdp.input(&session_id, events);
+}
+
+#[tauri::command]
+fn rdp_resize(state: State<'_, AppState>, session_id: String, width: u16, height: u16, scale: u32) {
+    state.rdp.resize(&session_id, width, height, scale);
+}
+
+/// Lets go of all keys and buttons (the tab lost focus).
+#[tauri::command]
+fn rdp_release(state: State<'_, AppState>, session_id: String) {
+    state.rdp.release_all(&session_id);
+}
+
+#[tauri::command]
+fn rdp_close(state: State<'_, AppState>, session_id: String) {
+    state.rdp.close(&session_id);
+}
+
 // ---- discovery ----
 
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1170,6 +1276,7 @@ pub fn run() {
                 ssh: SshSessions::new(),
                 transfers: sftp::Transfers::default(),
                 files: Default::default(),
+                rdp: Default::default(),
                 tunnels: Default::default(),
                 local: local::LocalTerms::default(),
                 shells: Mutex::new(None),
@@ -1243,6 +1350,15 @@ pub fn run() {
             sftp_upload,
             sftp_cancel,
             list_ftp_sites,
+            list_rdp,
+            save_rdp,
+            delete_rdp,
+            set_rdp_password,
+            rdp_open,
+            rdp_input,
+            rdp_resize,
+            rdp_release,
+            rdp_close,
             save_ftp_site,
             delete_ftp_site,
             set_ftp_password,

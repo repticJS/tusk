@@ -1,5 +1,5 @@
 // Starting values for new connections, SSH hosts and tunnels.
-import type { ConnectionConfig, FtpSite, SshHost, TunnelConfig } from "./api";
+import type { ConnectionConfig, FtpSite, RdpConfig, SshHost, TunnelConfig } from "./api";
 
 export const COLORS = ["#5b8cff", "#4cc38a", "#e7b350", "#f26d6d", "#b07cff", "#3fc1c9", "#ff8a4c", "#8a92a0"];
 
@@ -39,6 +39,24 @@ export const blankFtpSite = (): FtpSite => ({
   acceptInvalidCerts: false,
   startDir: "",
   color: COLORS[5],
+});
+
+export const blankRdp = (): RdpConfig => ({
+  id: "",
+  name: "",
+  host: "",
+  port: 3389,
+  user: "",
+  domain: "",
+  savePassword: true,
+  color: COLORS[4],
+  size: "fit",
+  scale: "fit",
+  colorDepth: 32,
+  performance: "best",
+  sound: true,
+  clipboard: true,
+  fullScreen: false,
 });
 
 export const blankTunnel = (hostId = ""): TunnelConfig => ({

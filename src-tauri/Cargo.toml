@@ -38,10 +38,26 @@ flate2 = "1"
 rand = "0.8"
 tauri-plugin-notification = "2"
 suppaftp = { version = "12", features = ["tokio-rustls-ring"] }
+ironrdp-connector = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+ironrdp-session = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+ironrdp-tokio = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff", features = ["rustls-ring"] }
+ironrdp-graphics = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff", features = ["alloc"] }
+ironrdp-dvc = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+ironrdp-displaycontrol = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+ironrdp-input = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+ironrdp-rdpsnd = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+ironrdp-rdpsnd-native = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+ironrdp-cliprdr = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+sha2 = "0.10"
 rustls-platform-verifier = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+ironrdp-cliprdr-native = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 [profile.release]
 codegen-units = 1

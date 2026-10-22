@@ -12,7 +12,7 @@
 
 use crate::error::{AppError, AppResult};
 use crate::ssh::SshConfig;
-use crate::store::{ConnectionConfig, Folder, FtpSite, SavedCommand, Store, TunnelConfig};
+use crate::store::{ConnectionConfig, Folder, FtpSite, RdpConfig, SavedCommand, Store, TunnelConfig};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -38,6 +38,8 @@ pub struct Counts {
     pub commands: usize,
     #[serde(default)]
     pub ftp_sites: usize,
+    #[serde(default)]
+    pub remote_desktops: usize,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
@@ -60,6 +62,9 @@ pub struct Secrets {
     /// FTP passwords by site id.
     #[serde(default)]
     pub ftp: HashMap<String, String>,
+    /// Remote desktop passwords by connection id.
+    #[serde(default)]
+    pub rdp: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -74,6 +79,8 @@ pub struct Bundle {
     pub commands: Vec<SavedCommand>,
     #[serde(default)]
     pub ftp_sites: Vec<FtpSite>,
+    #[serde(default)]
+    pub remote_desktops: Vec<RdpConfig>,
     #[serde(default)]
     pub secrets: Option<Secrets>,
 }
@@ -123,6 +130,7 @@ pub struct ExportInfo {
     pub extra_hosts: Vec<String>,
     pub passwords: usize,
     pub ftp_passwords: usize,
+    pub rdp_passwords: usize,
     pub ssh_secrets: usize,
     pub key_files: usize,
 }
@@ -172,7 +180,8 @@ pub fn collect(store: &Store, folder_id: &str) -> AppResult<(Bundle, Vec<String>
         h.key_path = h.key_path.as_deref().map(portable_path);
     }
     let ftp_sites = store.list_ftp().into_iter().filter(|f| inside(&f.folder_id)).collect();
-    Ok((Bundle { folders, connections, ssh_hosts, tunnels, commands, ftp_sites, secrets: None }, extra))
+    let remote_desktops = store.list_rdp().into_iter().filter(|r| inside(&r.folder_id)).collect();
+    Ok((Bundle { folders, connections, ssh_hosts, tunnels, commands, ftp_sites, remote_desktops, secrets: None }, extra))
 }
 
 /// "C:\Users\me\.ssh\id" → "~/.ssh/id", so it means the receiver's home.
@@ -193,6 +202,7 @@ pub fn counts(b: &Bundle) -> Counts {
         tunnels: b.tunnels.len(),
         commands: b.commands.len(),
         ftp_sites: b.ftp_sites.len(),
+        remote_desktops: b.remote_desktops.len(),
     }
 }
 
@@ -407,6 +417,20 @@ pub fn import(store: &mut Store, bundle: Bundle, parent: Option<String>, keys_di
             store.set_ftp_password(&id, Some(p))?;
         }
     }
+    for r in &bundle.remote_desktops {
+        let id = map(&r.id);
+        let password = secrets.rdp.get(&r.id);
+        let config = RdpConfig {
+            id: id.clone(),
+            folder_id: folder_of(&r.folder_id, &mut map),
+            save_password: password.is_some(),
+            ..r.clone()
+        };
+        store.upsert_rdp(config)?;
+        if let Some(p) = password {
+            store.set_rdp_password(&id, Some(p))?;
+        }
+    }
     for t in &bundle.tunnels {
         let tunnel = TunnelConfig { id: map(&t.id), host_id: map(&t.host_id), ..t.clone() };
         store.save_tunnel(tunnel)?;
@@ -524,6 +548,26 @@ mod tests {
         .unwrap();
         s.set_password("api-db", Some("db-secret")).unwrap();
         s.set_ssh_secret("web-01", Some("ssh-secret")).unwrap();
+        s.upsert_rdp(RdpConfig {
+            id: "jump".into(),
+            name: "Jump box".into(),
+            host: "10.0.0.5".into(),
+            port: 3389,
+            user: "admin".into(),
+            domain: "CORP".into(),
+            save_password: true,
+            color: None,
+            folder_id: Some("prod".into()),
+            size: "fit".into(),
+            scale: "fit".into(),
+            color_depth: 32,
+            performance: "best".into(),
+            sound: true,
+            clipboard: true,
+            full_screen: false,
+        })
+        .unwrap();
+        s.set_rdp_password("jump", Some("rdp-secret")).unwrap();
         s.set_ftp_password("cdn", Some("ftp-secret")).unwrap();
         s
     }
@@ -540,6 +584,7 @@ mod tests {
         assert_eq!(extra, ["bastion"]);
         assert_eq!(b.tunnels.len(), 1);
         assert_eq!(b.ftp_sites.len(), 1);
+        assert_eq!(b.remote_desktops.len(), 1);
     }
 
     #[test]
@@ -579,6 +624,9 @@ mod tests {
         assert_eq!(cdn.folder_id.as_deref(), Some(web.id.as_str()));
         assert!(!cdn.save_password);
         assert_eq!(dest.get_ftp_password(&cdn.id), None);
+        let jump = &dest.list_rdp()[0];
+        assert_eq!((jump.folder_id.as_deref(), jump.domain.as_str()), (Some(r.folder_id.as_str()), "CORP"));
+        assert_eq!(dest.get_rdp_password(&jump.id), None);
         // Importing again makes a second copy instead of overwriting.
         import(&mut dest, decode(&text, None).unwrap(), None, &std::env::temp_dir()).unwrap();
         assert_eq!(dest.list().len(), 2);
@@ -597,6 +645,7 @@ mod tests {
                 KeyFile { name: "id_ed25519".into(), content: "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n".into() },
             )]),
             ftp: HashMap::from([("cdn".into(), "ftp-secret".into())]),
+            rdp: HashMap::from([("jump".into(), "rdp-secret".into())]),
         });
         assert!(encode("Production", &b, None).is_err());
         assert!(encode("Production", &b, Some("short")).is_err());
@@ -614,6 +663,9 @@ mod tests {
         let cdn = &dest.list_ftp()[0];
         assert!(cdn.save_password);
         assert_eq!(dest.get_ftp_password(&cdn.id).as_deref(), Some("ftp-secret"));
+        let jump = &dest.list_rdp()[0];
+        assert!(jump.save_password);
+        assert_eq!(dest.get_rdp_password(&jump.id).as_deref(), Some("rdp-secret"));
         let bastion = dest.list_ssh().into_iter().find(|h| h.name == "bastion").unwrap();
         let key_path = bastion.key_path.unwrap();
         assert!(key_path.starts_with(keys_dir.to_string_lossy().as_ref()));

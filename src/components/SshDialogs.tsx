@@ -3,19 +3,23 @@ import { FolderOpen, ShieldAlert, ShieldQuestion } from "lucide-react";
 import { useState } from "react";
 import { sshApi, type SshAuth, type SshHost } from "../lib/api";
 import { useApp } from "../store";
-import { blankConnection, blankFtpSite, blankSshHost, COLORS } from "../lib/defaults";
+import { blankConnection, blankFtpSite, blankRdp, blankSshHost, COLORS } from "../lib/defaults";
 import { Field, Modal, Spinner } from "./ui";
 
-/** PostgreSQL / SSH / FTP switch shown at the top of a new-connection dialog. */
-export function KindSwitch({ value, folderId }: { value: "postgres" | "ssh" | "ftp"; folderId?: string | null }) {
+type Kind = "postgres" | "ssh" | "ftp" | "rdp";
+
+/** PostgreSQL / SSH / FTP / RDP switch shown at the top of a new-connection dialog. */
+export function KindSwitch({ value, folderId }: { value: Kind; folderId?: string | null }) {
   const s = useApp.getState();
-  const pick = (v: "postgres" | "ssh" | "ftp") => {
+  const pick = (v: Kind) => {
     if (v === value) return;
     s.closeConnectionDialog();
     s.closeSshDialog();
     s.closeFtpDialog();
+    s.closeRdpDialog();
     if (v === "ssh") s.openSshDialog({ ...blankSshHost(), folderId });
     else if (v === "ftp") s.openFtpDialog({ ...blankFtpSite(), folderId });
+    else if (v === "rdp") s.openRdpDialog({ ...blankRdp(), folderId });
     else s.openConnectionDialog({ ...blankConnection(), folderId });
   };
   return (
@@ -25,6 +29,7 @@ export function KindSwitch({ value, folderId }: { value: "postgres" | "ssh" | "f
           ["postgres", "PostgreSQL"],
           ["ssh", "SSH"],
           ["ftp", "FTP"],
+          ["rdp", "Remote desktop"],
         ] as const
       ).map(([v, label]) => (
         <button
@@ -249,8 +254,9 @@ export function SshSecretPrompt() {
   const sshHost = useApp((s) => s.sshHosts.find((h) => h.id === req?.hostId));
   // FTP sites ask for their password here too.
   const ftpSite = useApp((s) => s.ftpSites.find((f) => f.id === req?.hostId));
-  const host = sshHost ?? ftpSite;
-  const defaultPort = sshHost ? 22 : 21;
+  const rdp = useApp((s) => s.rdpConnections.find((r) => r.id === req?.hostId));
+  const host = sshHost ?? ftpSite ?? (rdp && { ...rdp, user: rdp.domain ? `${rdp.domain}\\${rdp.user}` : rdp.user });
+  const defaultPort = sshHost ? 22 : ftpSite ? 21 : 3389;
   const [value, setValue] = useState("");
   const [save, setSave] = useState(false);
   if (!req) return null;
@@ -305,7 +311,15 @@ export function HostKeyPrompt() {
   if (!req) return null;
   return (
     <Modal
-      title={req.changed ? "Host key changed" : "Unknown host"}
+      title={
+        req.certificate
+          ? req.changed
+            ? "Certificate changed"
+            : "Unknown computer"
+          : req.changed
+            ? "Host key changed"
+            : "Unknown host"
+      }
       width={560}
       closeOnBackdrop={false}
       onClose={() => resolve(false)}
@@ -315,7 +329,7 @@ export function HostKeyPrompt() {
             Cancel
           </button>
           <button className={req.changed ? "btn-danger" : "btn-primary"} onClick={() => resolve(true)}>
-            {req.changed ? "Replace key and connect" : "Trust and connect"}
+            {req.changed ? (req.certificate ? "Trust new certificate and connect" : "Replace key and connect") : "Trust and connect"}
           </button>
         </>
       }
@@ -328,11 +342,13 @@ export function HostKeyPrompt() {
         )}
         <div className="min-w-0 text-[13px]">
           <p>{req.message}</p>
-          <p className="mt-3 text-muted">Server key fingerprint:</p>
-          <div className="selectable mt-1 rounded-md bg-bg px-3 py-2 font-mono text-[12px] break-all">{req.key}</div>
+          <p className="mt-3 text-muted">{req.certificate ? "Certificate:" : "Server key fingerprint:"}</p>
+          <div className="selectable mt-1 rounded-md bg-bg px-3 py-2 font-mono text-[12px] break-all whitespace-pre-wrap">{req.key}</div>
           <p className="mt-3 text-[12px] text-faint">
             {req.changed
-              ? "Only continue if you know the server's key was changed (for example it was reinstalled)."
+              ? req.certificate
+                ? "Only continue if you know the computer's certificate was replaced (Windows renews its own certificate now and then)."
+                : "Only continue if you know the server's key was changed (for example it was reinstalled)."
               : "If you're not sure, compare this with the fingerprint shown by the server's administrator. Tusk will remember it."}
           </p>
         </div>

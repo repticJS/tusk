@@ -94,11 +94,64 @@ pub struct FtpSite {
     pub folder_id: Option<String>,
 }
 
+/// A saved remote desktop (RDP) connection.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RdpConfig {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub domain: String,
+    #[serde(default)]
+    pub save_password: bool,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    /// "fit" follows the tab's size; otherwise a fixed "1920x1080".
+    #[serde(default = "fit")]
+    pub size: String,
+    /// Fixed sizes: "fit" shrinks to the tab, "none" shows 1:1 with scrolling.
+    #[serde(default = "fit")]
+    pub scale: String,
+    /// 32 or 16 (16 for slow connections).
+    #[serde(default = "depth32")]
+    pub color_depth: u32,
+    /// "best" (wallpaper, animations, smooth fonts) or "fast".
+    #[serde(default = "best")]
+    pub performance: String,
+    /// Play the computer's sound here.
+    #[serde(default = "yes")]
+    pub sound: bool,
+    /// Share the clipboard (Windows).
+    #[serde(default = "yes")]
+    pub clipboard: bool,
+    /// Open full screen.
+    #[serde(default)]
+    pub full_screen: bool,
+}
+
+fn fit() -> String {
+    "fit".into()
+}
+
+fn best() -> String {
+    "best".into()
+}
+
+fn depth32() -> u32 {
+    32
+}
+
 /// Something that can be moved between folders.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemRef {
-    /// connection | ssh | ftp | folder
+    /// connection | ssh | ftp | rdp | folder
     pub kind: String,
     pub id: String,
 }
@@ -118,6 +171,8 @@ struct StoreFile {
     commands: Vec<SavedCommand>,
     #[serde(default)]
     ftp_sites: Vec<FtpSite>,
+    #[serde(default)]
+    rdp: Vec<RdpConfig>,
 }
 
 /// A named shell script to run on one or more SSH hosts (deploys, restarts…).
@@ -310,6 +365,55 @@ impl Store {
         self.set_password(&ftp_secret_key(id), password)
     }
 
+    // ---- remote desktops ----
+
+    pub fn list_rdp(&self) -> Vec<RdpConfig> {
+        self.file.rdp.clone()
+    }
+
+    pub fn get_rdp(&self, id: &str) -> AppResult<RdpConfig> {
+        self.file
+            .rdp
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+            .ok_or_else(|| AppError::msg(format!("Unknown remote desktop {id}")))
+    }
+
+    pub fn upsert_rdp(&mut self, config: RdpConfig) -> AppResult<()> {
+        if config.host.trim().is_empty() {
+            return Err(AppError::msg("Enter the computer's address"));
+        }
+        if config.size != "fit" && parse_size(&config.size).is_none() {
+            return Err(AppError::msg(format!("Unknown screen size {}", config.size)));
+        }
+        match self.file.rdp.iter_mut().find(|c| c.id == config.id) {
+            Some(existing) => *existing = config,
+            None => self.file.rdp.push(config),
+        }
+        self.save()
+    }
+
+    pub fn delete_rdp(&mut self, id: &str) -> AppResult<()> {
+        self.file.rdp.retain(|c| c.id != id);
+        self.save()?;
+        secret::delete(&self.dir, &rdp_secret_key(id));
+        Ok(())
+    }
+
+    pub fn get_rdp_password(&self, id: &str) -> Option<String> {
+        secret::get(&self.dir, &rdp_secret_key(id))
+    }
+
+    pub fn set_rdp_password(&self, id: &str, password: Option<&str>) -> AppResult<()> {
+        self.set_password(&rdp_secret_key(id), password)
+    }
+
+    /// Certificates of remote desktops the user has trusted: "host:port" → fingerprint.
+    pub fn rdp_known_path(&self) -> PathBuf {
+        self.dir.join("rdp_known_hosts.json")
+    }
+
     // ---- saved commands ----
 
     pub fn list_commands(&self) -> Vec<SavedCommand> {
@@ -457,6 +561,9 @@ impl Store {
         for f in self.file.ftp_sites.iter_mut().filter(|f| f.folder_id.as_deref() == Some(id)) {
             f.folder_id = parent.clone();
         }
+        for r in self.file.rdp.iter_mut().filter(|r| r.folder_id.as_deref() == Some(id)) {
+            r.folder_id = parent.clone();
+        }
         self.file.folders.retain(|f| f.id != id);
         self.save()
     }
@@ -479,6 +586,11 @@ impl Store {
                 "ftp" => {
                     if let Some(f) = self.file.ftp_sites.iter_mut().find(|f| f.id == item.id) {
                         f.folder_id = folder_id.clone();
+                    }
+                }
+                "rdp" => {
+                    if let Some(r) = self.file.rdp.iter_mut().find(|r| r.id == item.id) {
+                        r.folder_id = folder_id.clone();
                     }
                 }
                 "folder" => {
@@ -535,6 +647,17 @@ fn ssh_secret_key(id: &str) -> String {
 
 fn ftp_secret_key(id: &str) -> String {
     format!("ftp:{id}")
+}
+
+fn rdp_secret_key(id: &str) -> String {
+    format!("rdp:{id}")
+}
+
+/// "1920x1080" → (1920, 1080).
+pub fn parse_size(s: &str) -> Option<(u16, u16)> {
+    let (w, h) = s.split_once('x')?;
+    let (w, h) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    ((200..=8192).contains(&w) && (200..=8192).contains(&h)).then_some((w, h))
 }
 
 #[cfg(windows)]

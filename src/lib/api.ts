@@ -25,7 +25,7 @@ export interface Folder {
   parentId?: string | null;
 }
 
-export type ItemKind = "connection" | "ssh" | "ftp" | "folder";
+export type ItemKind = "connection" | "ssh" | "ftp" | "rdp" | "folder";
 
 export const folderApi = {
   list: () => call<Folder[]>("list_folders"),
@@ -44,6 +44,7 @@ export interface ShareCounts {
   tunnels: number;
   commands?: number;
   ftpSites?: number;
+  remoteDesktops?: number;
 }
 
 export interface ShareInfo {
@@ -53,6 +54,7 @@ export interface ShareInfo {
   extraHosts: string[];
   passwords: number;
   ftpPasswords: number;
+  rdpPasswords: number;
   sshSecrets: number;
   keyFiles: number;
 }
@@ -759,6 +761,76 @@ export const localFsApi = {
   mkdir: (path: string) => call<void>("local_mkdir", { path }),
   rename: (from: string, to: string) => call<void>("local_rename", { from, to }),
   remove: (paths: string[]) => call<void>("local_delete", { paths }),
+};
+
+// ---- remote desktop ----
+
+export interface RdpConfig {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  domain: string;
+  savePassword: boolean;
+  color?: string | null;
+  folderId?: string | null;
+  /** "fit" follows the tab's size; otherwise fixed, like "1920x1080". */
+  size: string;
+  /** Fixed sizes: "fit" shrinks to the tab, "none" shows 1:1 with scrolling. */
+  scale: "fit" | "none";
+  colorDepth: 16 | 32;
+  performance: "best" | "fast";
+  sound: boolean;
+  clipboard: boolean;
+  fullScreen: boolean;
+}
+
+export type RdpEvent =
+  | { type: "connected"; width: number; height: number }
+  | { type: "resized"; width: number; height: number }
+  | { type: "pointer"; kind: "default" | "hidden" }
+  | { type: "closed"; reason?: string | null };
+
+/** Input for the remote desktop, in its pixels. Keys are set-1 scancodes (0xE0xx extended). */
+export type RdpInput =
+  | { t: "m"; x: number; y: number }
+  | { t: "b"; button: number; down: boolean }
+  | { t: "w"; delta: number; horizontal: boolean }
+  | { t: "k"; code: number; down: boolean }
+  | { t: "u"; ch: string; down: boolean };
+
+export const rdpApi = {
+  list: () => call<RdpConfig[]>("list_rdp"),
+  save: (config: RdpConfig, password: string | null) => call<void>("save_rdp", { config, password }),
+  remove: (id: string) => call<void>("delete_rdp", { id }),
+  setPassword: (id: string, password: string, save: boolean) => call<void>("set_rdp_password", { id, password, save }),
+  /**
+   * Connects. Screen updates and pointer images arrive as binary on
+   * `onData`, lifecycle events on `onEvent`. Rejects with RDP_* kinds for
+   * passwords and certificates.
+   */
+  open(
+    sessionId: string,
+    connId: string,
+    size: { width: number; height: number; scale: number },
+    acceptFingerprint: string | null,
+    onData: (data: ArrayBuffer) => void,
+    onEvent: (e: RdpEvent) => void,
+  ) {
+    const events = new Channel<ArrayBuffer | RdpEvent>();
+    events.onmessage = (m) => {
+      if (m instanceof ArrayBuffer) onData(m);
+      else if (ArrayBuffer.isView(m)) onData(m.buffer.slice(m.byteOffset, m.byteOffset + m.byteLength) as ArrayBuffer);
+      else onEvent(m);
+    };
+    return call<void>("rdp_open", { sessionId, connId, ...size, acceptFingerprint, events });
+  },
+  input: (sessionId: string, events: RdpInput[]) => invoke<void>("rdp_input", { sessionId, events }).catch(() => {}),
+  resize: (sessionId: string, width: number, height: number, scale: number) =>
+    invoke<void>("rdp_resize", { sessionId, width, height, scale }).catch(() => {}),
+  release: (sessionId: string) => invoke<void>("rdp_release", { sessionId }).catch(() => {}),
+  close: (sessionId: string) => invoke<void>("rdp_close", { sessionId }).catch(() => {}),
 };
 
 /** Joins a remote POSIX directory and name. */

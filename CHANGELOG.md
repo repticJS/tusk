@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.0
+
+- Remote desktop: connect to Windows PCs and servers (RDP) in a Tusk tab. Save the user, domain and password, put connections in folders and share them.
+- Display options per connection: fit the tab (resizes with it) or a fixed size, colour depth, best looking or fastest, and full screen.
+- Sound from the remote computer, shared clipboard on Windows, and Send keys for Ctrl+Alt+Del, the Windows key and Alt+Tab.
+- The computer's certificate is checked on first connect and you're warned if it changes, before any password is sent.
+
 ## 0.12.0
 
 - File manager: a FileZilla-style Files tab with this PC on one side and a server on the other. Drag files and folders between them, or double-click to transfer.

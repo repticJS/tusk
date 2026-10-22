@@ -33,10 +33,11 @@ import {
   X,
   FolderSync,
   Server,
+  ScreenShare,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ConnectionConfig, Folder, FtpSite, ItemKind, SshHost } from "../lib/api";
-import { blankConnection, blankFtpSite, blankSshHost, blankTunnel } from "../lib/defaults";
+import type { ConnectionConfig, Folder, FtpSite, ItemKind, RdpConfig, SshHost } from "../lib/api";
+import { blankConnection, blankFtpSite, blankRdp, blankSshHost, blankTunnel } from "../lib/defaults";
 import * as meta from "../lib/meta";
 import { qualified } from "../lib/sql";
 import { clickSuppressed, startTreeDrag, useTreeDrag, type DragItem } from "../lib/treeDrag";
@@ -54,6 +55,7 @@ export function Sidebar() {
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
   const ftpSites = useApp((s) => s.ftpSites);
+  const rdpConnections = useApp((s) => s.rdpConnections);
   const folders = useApp((s) => s.folders);
   const shells = useApp((s) => s.shells);
   const status = useApp((s) => s.status);
@@ -95,7 +97,7 @@ export function Sidebar() {
         keep.add(h.id);
         addPath(h.folderId);
       }
-    for (const f of ftpSites)
+    for (const f of [...ftpSites, ...rdpConnections])
       if (f.name.toLowerCase().includes(q) || f.host.toLowerCase().includes(q)) {
         keep.add(f.id);
         addPath(f.folderId);
@@ -107,7 +109,7 @@ export function Sidebar() {
       }
     for (const f of folders) if (f.name.toLowerCase().includes(q)) addPath(f.id);
     return keep;
-  }, [q, folders, sshHosts, ftpSites, connections, status]);
+  }, [q, folders, sshHosts, ftpSites, rdpConnections, connections, status]);
 
   const onDrop = (item: DragItem, folderId: string | null) => {
     if (item.kind === "folder" && item.id === folderId) return;
@@ -115,7 +117,8 @@ export function Sidebar() {
   };
 
   const tree: TreeCtx = { q, visible, expanded, toggle, openMenu, onDrop, onMove: setMoving };
-  const empty = connections.length === 0 && sshHosts.length === 0 && ftpSites.length === 0 && folders.length === 0;
+  const empty =
+    connections.length === 0 && sshHosts.length === 0 && ftpSites.length === 0 && rdpConnections.length === 0 && folders.length === 0;
 
   return (
     <div className="flex h-full flex-col bg-panel">
@@ -158,6 +161,7 @@ export function Sidebar() {
             { label: "New PostgreSQL connection", icon: <Database size={13} />, onClick: () => openConnectionDialog() },
             { label: "New SSH host", icon: <TerminalSquare size={13} />, onClick: () => openSshDialog() },
             { label: "New FTP site", icon: <Server size={13} />, onClick: () => useApp.getState().openFtpDialog() },
+            { label: "New remote desktop", icon: <ScreenShare size={13} />, onClick: () => useApp.getState().openRdpDialog() },
             "separator",
             { label: "New folder", icon: <FolderPlus size={13} />, onClick: () => void createFolder(null) },
             { label: "New command…", icon: <Zap size={13} />, onClick: () => useApp.getState().openCommandDialog() },
@@ -196,6 +200,7 @@ export function Sidebar() {
             { label: "New PostgreSQL connection", icon: <Database size={13} />, onClick: () => openConnectionDialog() },
             { label: "New SSH host", icon: <TerminalSquare size={13} />, onClick: () => openSshDialog() },
             { label: "New FTP site", icon: <Server size={13} />, onClick: () => useApp.getState().openFtpDialog() },
+            { label: "New remote desktop", icon: <ScreenShare size={13} />, onClick: () => useApp.getState().openRdpDialog() },
             { label: "New folder", icon: <FolderPlus size={13} />, onClick: () => void createFolder(null) },
           ]);
         }}
@@ -240,6 +245,7 @@ function FolderContents({ parentId, depth, tree }: { parentId: string | null; de
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
   const ftpSites = useApp((s) => s.ftpSites);
+  const rdpConnections = useApp((s) => s.rdpConnections);
   const inHere = (f?: string | null) => (f ?? null) === parentId;
   const show = (id: string) => !tree.visible || tree.visible.has(id);
   const subfolders = folders.filter((f) => inHere(f.parentId) && show(f.id)).sort(byName);
@@ -247,6 +253,7 @@ function FolderContents({ parentId, depth, tree }: { parentId: string | null; de
     ...connections.filter((c) => inHere(c.folderId) && show(c.id)).map((c) => ({ name: c.name, conn: c })),
     ...sshHosts.filter((h) => inHere(h.folderId) && show(h.id)).map((h) => ({ name: h.name, host: h })),
     ...ftpSites.filter((f) => inHere(f.folderId) && show(f.id)).map((f) => ({ name: f.name, site: f })),
+    ...rdpConnections.filter((r) => inHere(r.folderId) && show(r.id)).map((r) => ({ name: r.name, rdp: r })),
   ].sort(byName);
   return (
     <>
@@ -275,6 +282,10 @@ function FolderContents({ parentId, depth, tree }: { parentId: string | null; de
           <div key={it.site.id} data-drop={parentId ?? ""}>
             <FtpNode site={it.site} depth={depth} openMenu={tree.openMenu} onDrop={tree.onDrop} onMove={tree.onMove} />
           </div>
+        ) : "rdp" in it && it.rdp ? (
+          <div key={it.rdp.id} data-drop={parentId ?? ""}>
+            <RdpNode conn={it.rdp} depth={depth} openMenu={tree.openMenu} onDrop={tree.onDrop} onMove={tree.onMove} />
+          </div>
         ) : null,
       )}
     </>
@@ -289,7 +300,8 @@ function FolderNode({ folder, depth, tree }: { folder: Folder; depth: number; tr
       s.folders.filter((f) => f.parentId === folder.id).length +
       s.connections.filter((c) => c.folderId === folder.id).length +
       s.sshHosts.filter((h) => h.folderId === folder.id).length +
-      s.ftpSites.filter((f) => f.folderId === folder.id).length,
+      s.ftpSites.filter((f) => f.folderId === folder.id).length +
+      s.rdpConnections.filter((r) => r.folderId === folder.id).length,
   );
   const toggleFolder = useApp((s) => s.toggleFolder);
   const renameFolder = useApp((s) => s.renameFolder);
@@ -336,6 +348,11 @@ function FolderNode({ folder, depth, tree }: { folder: Folder; depth: number; tr
               label: "New FTP site here",
               icon: <Server size={13} />,
               onClick: () => useApp.getState().openFtpDialog({ ...blankFtpSite(), folderId: folder.id }),
+            },
+            {
+              label: "New remote desktop here",
+              icon: <ScreenShare size={13} />,
+              onClick: () => useApp.getState().openRdpDialog({ ...blankRdp(), folderId: folder.id }),
             },
             "separator",
             { label: "Share folder…", icon: <Share2 size={13} />, onClick: () => useApp.getState().openShareDialog(folder.id) },
@@ -736,6 +753,94 @@ function FtpNode({
         >
           <div className="p-4 text-[13px]">
             Remove <b>{site.name}</b> ({target}) and its saved password from Tusk? Files tabs open on it will close.
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+function RdpNode({
+  conn,
+  depth,
+  openMenu,
+  onDrop,
+  onMove,
+}: {
+  conn: RdpConfig;
+  depth: number;
+  openMenu: NodeProps["openMenu"];
+  onDrop: NodeProps["onDrop"];
+  onMove: NodeProps["onMove"];
+}) {
+  const open = () => useApp.getState().openRdpTab(conn.id);
+  const isOpen = useApp((s) => s.tabs.some((t) => t.kind === "rdp" && t.connId === conn.id));
+  const isActive = useApp((s) => {
+    const t = s.tabs.find((x) => x.id === s.activeTabId);
+    return t?.kind === "rdp" && t.connId === conn.id;
+  });
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const target = `${conn.domain ? `${conn.domain}\\` : ""}${conn.user ? `${conn.user}@` : ""}${conn.host}${conn.port === 3389 ? "" : `:${conn.port}`}`;
+  return (
+    <>
+      <Row
+        depth={depth}
+        onPointerDown={(e) => startTreeDrag(e, { kind: "rdp", id: conn.id, label: conn.name }, onDrop)}
+        active={isActive}
+        icon={
+          <span className="relative">
+            <ScreenShare size={14} style={{ color: conn.color ?? undefined }} />
+            {isOpen && <span className="absolute -right-0.5 -bottom-0.5 h-1.5 w-1.5 rounded-full bg-ok ring-2 ring-panel" />}
+          </span>
+        }
+        label={<span className="font-medium">{conn.name}</span>}
+        right={<span className="font-mono">RDP</span>}
+        title={`${target}\nClick to connect`}
+        onClick={() => !clickSuppressed() && open()}
+        onContextMenu={(e) =>
+          openMenu(e, [
+            { label: "Connect", icon: <ScreenShare size={13} />, onClick: open },
+            "separator",
+            { label: "Edit…", icon: <Pencil size={13} />, onClick: () => useApp.getState().openRdpDialog(conn) },
+            {
+              label: "Duplicate",
+              icon: <Copy size={13} />,
+              onClick: () => useApp.getState().openRdpDialog({ ...conn, id: "", name: `${conn.name} copy` }),
+            },
+            { label: "Copy address", icon: <Copy size={13} />, onClick: () => void navigator.clipboard.writeText(`${conn.host}:${conn.port}`) },
+            {
+              label: "Move to…",
+              icon: <FolderInput size={13} />,
+              onClick: () => onMove({ kind: "rdp", id: conn.id, label: conn.name }),
+            },
+            { label: "Delete…", icon: <Trash2 size={13} />, danger: true, onClick: () => setConfirmDelete(true) },
+          ])
+        }
+      />
+      {confirmDelete && (
+        <Modal
+          title="Delete remote desktop"
+          width={420}
+          onClose={() => setConfirmDelete(false)}
+          footer={
+            <>
+              <button className="btn-outline" onClick={() => setConfirmDelete(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn-danger"
+                onClick={() => {
+                  setConfirmDelete(false);
+                  void useApp.getState().deleteRdp(conn.id);
+                }}
+              >
+                Delete
+              </button>
+            </>
+          }
+        >
+          <div className="p-4 text-[13px]">
+            Remove <b>{conn.name}</b> ({target}) and its saved password from Tusk? An open session to it will close.
           </div>
         </Modal>
       )}

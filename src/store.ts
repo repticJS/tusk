@@ -7,6 +7,7 @@ import {
   folderApi,
   ftpApi,
   localApi,
+  rdpApi,
   sshApi,
   tunnelApi,
   withSshPrompts,
@@ -23,6 +24,7 @@ import {
   type Folder,
   type FtpSite,
   type ItemKind,
+  type RdpConfig,
   type MonitorSettings,
   type MonitorView,
   type Pm2Action,
@@ -163,6 +165,14 @@ export interface RemoteFileTab {
   filesId?: string;
 }
 
+/** A remote desktop (RDP) session. */
+export interface RdpTab {
+  id: string;
+  kind: "rdp";
+  title: string;
+  connId: string;
+}
+
 /** File manager: this PC on one side, a server (SFTP or FTP) on the other. */
 export interface FilesTab {
   id: string;
@@ -187,6 +197,7 @@ export type Tab =
   | LocalTab
   | RemoteFileTab
   | FilesTab
+  | RdpTab
   | TunnelsTab
   | DiscoverTab
   | MonitorTab
@@ -250,6 +261,8 @@ export interface HostKeyRequest {
   message: string;
   key: string;
   changed: boolean;
+  /** A remote desktop's TLS certificate rather than an SSH host key. */
+  certificate?: boolean;
   resolve: (accept: boolean) => void;
 }
 
@@ -262,6 +275,7 @@ interface State {
   connections: ConnectionConfig[];
   sshHosts: SshHost[];
   ftpSites: FtpSite[];
+  rdpConnections: RdpConfig[];
   folders: Folder[];
   /** Folder ids the user has collapsed (folders start open). */
   collapsedFolders: string[];
@@ -300,6 +314,9 @@ interface State {
   connectionDialog: { open: boolean; editing?: ConnectionConfig; password?: string };
   sshDialog: { open: boolean; editing?: SshHost };
   ftpDialog: { open: boolean; editing?: FtpSite };
+  rdpDialog: { open: boolean; editing?: RdpConfig };
+  /** A remote desktop tab shown full screen (the rest of Tusk hidden). */
+  fullScreenTab: string | null;
   tunnelDialog: { open: boolean; editing?: Partial<TunnelConfig> };
   /** Folder being shared. */
   shareFolderId: string | null;
@@ -322,6 +339,12 @@ interface State {
   deleteSshHost(id: string): Promise<void>;
   openTerminalTab(hostId: string, opts?: TerminalOptions): void;
   openRemoteFile(termId: string, hostId: string, path: string, filesId?: string): void;
+  openRdpDialog(editing?: RdpConfig): void;
+  closeRdpDialog(): void;
+  deleteRdp(id: string): Promise<void>;
+  /** Opens a remote desktop tab (or switches to the open one). */
+  openRdpTab(connId: string): void;
+  setFullScreenTab(id: string | null): void;
   openFtpDialog(editing?: FtpSite): void;
   closeFtpDialog(): void;
   deleteFtpSite(id: string): Promise<void>;
@@ -450,6 +473,7 @@ export const useApp = create<State>()(
       connections: [],
       sshHosts: [],
       ftpSites: [],
+      rdpConnections: [],
       folders: [],
       collapsedFolders: [],
       renamingFolderId: null,
@@ -477,6 +501,8 @@ export const useApp = create<State>()(
       connectionDialog: { open: false },
       sshDialog: { open: false },
       ftpDialog: { open: false },
+      rdpDialog: { open: false },
+      fullScreenTab: null,
       tunnelDialog: { open: false },
       shareFolderId: null,
       importDialog: null,
@@ -495,21 +521,29 @@ export const useApp = create<State>()(
       setRowLimit: (rowLimit) => set({ rowLimit }),
 
       async loadConnections() {
-        const [connections, sshHosts, folders, tunnels, commands, ftpSites] = await Promise.all([
+        const [connections, sshHosts, folders, tunnels, commands, ftpSites, rdpConnections] = await Promise.all([
           api.listConnections(),
           sshApi.list(),
           folderApi.list(),
           tunnelApi.list(),
           commandsApi.list(),
           ftpApi.list(),
+          rdpApi.list(),
         ]);
         // Drop tabs whose connection or host no longer exists.
-        const ids = new Set([...connections.map((c) => c.id), ...sshHosts.map((h) => h.id), ...ftpSites.map((f) => f.id)]);
+        const ids = new Set([
+          ...connections.map((c) => c.id),
+          ...sshHosts.map((h) => h.id),
+          ...ftpSites.map((f) => f.id),
+          ...rdpConnections.map((r) => r.id),
+        ]);
         const tabs = get().tabs.filter(
           (t) =>
             t.kind === "files"
               ? !t.target || ids.has(t.target.id)
-              : t.kind === "tunnels" ||
+              : t.kind === "rdp"
+                ? ids.has(t.connId)
+                : t.kind === "tunnels" ||
                 t.kind === "discover" ||
                 t.kind === "monitor" ||
                 t.kind === "commands" ||
@@ -520,7 +554,7 @@ export const useApp = create<State>()(
         const activeTabId = tabs.some((t) => t.id === get().activeTabId)
           ? get().activeTabId
           : (tabs[0]?.id ?? null);
-        set({ connections, sshHosts, ftpSites, folders, tunnels, commands, tabs, activeTabId });
+        set({ connections, sshHosts, ftpSites, rdpConnections, folders, tunnels, commands, tabs, activeTabId });
       },
 
       openConnectionDialog: (editing, password) => set({ connectionDialog: { open: true, editing, password } }),
@@ -569,6 +603,30 @@ export const useApp = create<State>()(
         const tab: RemoteFileTab = { id, kind: "remote", termId, hostId, path, filesId, title: path.split("/").pop() || path };
         set((s) => ({ tabs: [...s.tabs, tab], activeTabId: id }));
       },
+
+      openRdpDialog: (editing) => set({ rdpDialog: { open: true, editing } }),
+      closeRdpDialog: () => set({ rdpDialog: { open: false } }),
+
+      async deleteRdp(id) {
+        try {
+          await rdpApi.remove(id);
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+          return;
+        }
+        await get().loadConnections();
+      },
+
+      openRdpTab(connId) {
+        const conn = get().rdpConnections.find((r) => r.id === connId);
+        if (!conn) return;
+        const existing = get().tabs.find((t) => t.kind === "rdp" && t.connId === connId);
+        if (existing) return set({ activeTabId: existing.id });
+        const tab: RdpTab = { id: uid(), kind: "rdp", title: conn.name, connId };
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
+      },
+
+      setFullScreenTab: (fullScreenTab) => set({ fullScreenTab }),
 
       openFtpDialog: (editing) => set({ ftpDialog: { open: true, editing } }),
       closeFtpDialog: () => set({ ftpDialog: { open: false } }),
@@ -1232,6 +1290,8 @@ export const useApp = create<State>()(
         if (tab?.kind === "terminal") void sshApi.close(tab.id).catch(() => {});
         if (tab?.kind === "local") void localApi.close(tab.id).catch(() => {});
         if (tab?.kind === "files") void filesApi.close(tab.id).catch(() => {});
+        if (tab?.kind === "rdp") void rdpApi.close(tab.id);
+        if (get().fullScreenTab === id) set({ fullScreenTab: null });
         set((s) => {
           const idx = s.tabs.findIndex((t) => t.id === id);
           const tabs = s.tabs.filter((t) => t.id !== id);

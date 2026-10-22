@@ -6,6 +6,7 @@ import {
   FileCode2,
   FolderSync,
   LayoutGrid,
+  ScreenShare,
   Monitor,
   Moon,
   Plus,
@@ -32,6 +33,9 @@ import { TableTab } from "./components/TableTab";
 import { RemoteFileTab } from "./components/RemoteFileTab";
 import { FilesTab } from "./components/FilesTab";
 import { FtpDialog } from "./components/FtpDialog";
+import { RdpDialog } from "./components/RdpDialog";
+import { RdpTab } from "./components/RdpTab";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TerminalTab } from "./components/TerminalTab";
 import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
 import { DiscoverTab } from "./components/DiscoverTab";
@@ -62,6 +66,14 @@ export default function App() {
   const connectionDialog = useApp((s) => s.connectionDialog);
   const sshDialog = useApp((s) => s.sshDialog);
   const ftpDialog = useApp((s) => s.ftpDialog);
+  const rdpDialog = useApp((s) => s.rdpDialog);
+  // A remote desktop shown full screen hides the rest of Tusk.
+  const fullScreen = useApp((s) => (s.fullScreenTab && s.fullScreenTab === s.activeTabId ? s.fullScreenTab : null));
+  useEffect(() => {
+    void getCurrentWindow()
+      .setFullscreen(!!fullScreen)
+      .catch(() => {});
+  }, [fullScreen]);
   const tunnelDialog = useApp((s) => s.tunnelDialog);
   const paletteOpen = useApp((s) => s.paletteOpen);
   const historyOpen = useApp((s) => s.historyOpen);
@@ -93,7 +105,7 @@ export default function App() {
       const s = useApp.getState();
       const mod = e.ctrlKey || e.metaKey;
       const key = e.key.toLowerCase();
-      const inTerminal = !!(e.target as HTMLElement | null)?.closest?.(".xterm");
+      const inTerminal = !!(e.target as HTMLElement | null)?.closest?.(".xterm, [data-rdp-surface]");
       // WebView2 keeps browser shortcuts: reload, find bar, print, view source,
       // downloads. Components handle the ones they use before this runs.
       if (e.key === "F5" || (mod && ["r", "f", "g", "u", "j"].includes(key))) {
@@ -160,7 +172,9 @@ export default function App() {
                         width: `${100 / cols}%`,
                         height: `${100 / rows}%`,
                       }
-                  : { display: t.id === activeTabId ? "block" : "none" };
+                  : t.id === fullScreen
+                    ? { display: "block", position: "fixed", inset: 0, zIndex: 40 }
+                    : { display: t.id === activeTabId ? "block" : "none" };
                 return (
                 <div
                   key={t.id}
@@ -192,6 +206,8 @@ export default function App() {
                     <RunTab tab={t} active={t.id === activeTabId} />
                   ) : t.kind === "files" ? (
                     <FilesTab tab={t} active={t.id === activeTabId} />
+                  ) : t.kind === "rdp" ? (
+                    <RdpTab tab={t} active={t.id === activeTabId} />
                   ) : (
                     <RemoteFileTab tab={t} active={t.id === activeTabId} />
                   )}
@@ -207,6 +223,7 @@ export default function App() {
       {connectionDialog.open && <ConnectionDialog key={connectionDialog.editing?.id ?? "new"} />}
       {sshDialog.open && <SshDialog key={sshDialog.editing?.id ?? "new"} />}
       {ftpDialog.open && <FtpDialog key={ftpDialog.editing?.id || "new"} />}
+      {rdpDialog.open && <RdpDialog key={rdpDialog.editing?.id || "new"} />}
       {tunnelDialog.open && <TunnelDialog key={tunnelDialog.editing?.id || "new"} />}
       <ShareDialog />
       <CommandDialog />
@@ -233,6 +250,7 @@ function TabBar() {
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
   const ftpSites = useApp((s) => s.ftpSites);
+  const rdpConnections = useApp((s) => s.rdpConnections);
   const dirty = useApp((s) => s.dirty);
   const multiExec = useApp((s) => s.multiExec);
   const [menu, openMenu] = useMenu();
@@ -251,6 +269,8 @@ function TabBar() {
             t.kind === "commands" ||
             t.kind === "run"
               ? undefined
+              : t.kind === "rdp"
+                ? rdpConnections.find((r) => r.id === t.connId)
               : t.kind === "files"
                 ? t.target && (t.target.kind === "ssh" ? sshHosts : ftpSites).find((h) => h.id === t.target!.id)
                 : t.kind === "terminal" || t.kind === "remote"
@@ -286,6 +306,8 @@ function TabBar() {
                       ? "Monitoring"
                       : t.kind === "files"
                         ? `Files${conn ? `: ${conn.name}` : ""}`
+                      : t.kind === "rdp"
+                        ? `Remote desktop: ${conn?.name ?? ""}`
                       : t.kind === "commands" || t.kind === "run"
                         ? t.title
                   : t.kind === "local"
@@ -323,6 +345,8 @@ function TabBar() {
                   <Zap size={13} />
                 ) : t.kind === "files" ? (
                   <FolderSync size={13} />
+                ) : t.kind === "rdp" ? (
+                  <ScreenShare size={13} />
                 ) : (
                   <FileCode2 size={13} />
                 )}
