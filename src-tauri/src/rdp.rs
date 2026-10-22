@@ -22,7 +22,8 @@ use ironrdp_pdu::input::fast_path::FastPathInputEvent;
 use ironrdp_pdu::rdp::client_info::PerformanceFlags;
 use ironrdp_session::image::DecodedImage;
 use ironrdp_session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
-use ironrdp_tokio::{single_sequence_step_read, split_tokio_framed, FramedWrite, NetworkClient};
+use ironrdp_connector::Sequence as _;
+use ironrdp_tokio::{split_tokio_framed, FramedWrite, NetworkClient};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -252,7 +253,8 @@ fn connector_config(c: &RdpConfig, password: &str, size: DesktopSize, scale: u32
         support_dyn_vc_gfx_protocol: false,
         credentials: Credentials::UsernamePassword { username: c.user.trim().to_string(), password: password.to_string() },
         domain: Some(c.domain.trim().to_string()).filter(|d| !d.is_empty()),
-        client_build: 0,
+        // Servers treat build 419 and below as clients that can't resize.
+        client_build: 22621,
         client_name: host_name,
         keyboard_type: ironrdp_pdu::gcc::KeyboardType::IBM_ENHANCED,
         keyboard_subtype: 0,
@@ -292,10 +294,11 @@ fn hostname() -> String {
         .collect()
 }
 
-/// RDP needs an even width within 200..8192.
+/// RDP needs an even width within 200..8192; some servers (xrdp) only
+/// resize to widths that are a multiple of 4.
 fn adjust(width: u16, height: u16) -> DesktopSize {
     let (w, h) = MonitorLayoutEntry::adjust_display_size(u32::from(width), u32::from(height));
-    DesktopSize { width: w as u16, height: h as u16 }
+    DesktopSize { width: (w as u16) & !3, height: h as u16 }
 }
 
 fn known_hosts(path: &Path) -> HashMap<String, String> {
@@ -515,12 +518,14 @@ async fn run(
     let mut flush = tokio::time::interval(FLUSH_EVERY);
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut housekeeping = tokio::time::interval(Duration::from_secs(5));
+    // The size last asked for, until the server has switched to it.
+    let mut requested: Option<DesktopSize> = None;
 
     loop {
         let outputs = tokio::select! {
             frame = reader.read_pdu() => {
                 let (action, payload) = frame.map_err(session_err)?;
-                stage.process(&mut image, action, &payload, reader.last_read_at()).map_err(session_err)?
+                stage.process(&mut image, action, &payload, reader.last_read_at()).map_err(|e| session_err(e.report()))?
             }
             msg = rx.recv() => match msg {
                 None => stage.graceful_shutdown().map_err(session_err)?,
@@ -538,9 +543,16 @@ async fn run(
                     if s.width == image.width() && s.height == image.height() {
                         Vec::new()
                     } else {
-                        let scale = (scale > 100).then_some(scale);
-                        match stage.encode_resize(u32::from(s.width), u32::from(s.height), scale, None) {
-                            Some(frame) => vec![ActiveStageOutput::ResponseFrame(frame.map_err(session_err)?)],
+                        // Some servers (xrdp) ignore layouts without a scale and a
+                        // physical size; give both (the size at the scale's DPI).
+                        let scale = scale.clamp(100, 500);
+                        let mm = |px: u16| (f64::from(px) * 25.4 * 100.0 / (96.0 * f64::from(scale))).round() as u32;
+                        match stage.encode_resize(u32::from(s.width), u32::from(s.height), Some(scale), Some((mm(s.width), mm(s.height)))) {
+                            Some(frame) => {
+                                requested = Some(s);
+                                vec![ActiveStageOutput::ResponseFrame(frame.map_err(session_err)?)]
+                            }
+                            // No display control channel: connect again at the new size.
                             None => return Ok(Flow::Reconnect(s)),
                         }
                     }
@@ -584,41 +596,71 @@ async fn run(
                 ActiveStageOutput::DeactivateAll => {
                     // The server changed the session (often its size): run the
                     // Deactivation-Reactivation Sequence and start a new screen.
+                    // Servers that get it slightly wrong (xrdp) are reconnected at
+                    // the size that was asked for instead.
                     let mut activation = activation_factory.create();
                     let mut buf = WriteBuf::new();
-                    loop {
-                        let written = single_sequence_step_read(&mut reader, &mut activation, &mut buf).await.map_err(session_err)?;
-                        if written.size().is_some() {
-                            writer.write_all(buf.filled()).await.map_err(session_err)?;
-                        }
-                        if let ConnectionActivationState::Finalized {
-                            desktop_size,
-                            share_id,
-                            enable_server_pointer,
-                            pointer_software_rendering,
-                            static_channel_chunk_size,
-                            window_support_level,
-                            ..
-                        } = activation.connection_activation_state()
-                        {
-                            image = DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
-                            if !stage.reactivate(
-                                activation.io_channel_id(),
-                                activation.user_channel_id(),
+                    let mut deferred = Vec::new();
+                    let reactivated = async {
+                        loop {
+                            let written = reactivation_step(&mut reader, &mut activation, &mut buf, &mut deferred).await?;
+                            if written.size().is_some() {
+                                writer.write_all(buf.filled()).await.map_err(session_err)?;
+                            }
+                            if let ConnectionActivationState::Finalized {
+                                desktop_size,
                                 share_id,
                                 enable_server_pointer,
                                 pointer_software_rendering,
                                 static_channel_chunk_size,
-                            ) {
-                                return Err("Connection lost: the server sent an invalid channel size".into());
+                                window_support_level,
+                                ..
+                            } = activation.connection_activation_state()
+                            {
+                                return Ok::<_, String>((
+                                    desktop_size,
+                                    share_id,
+                                    enable_server_pointer,
+                                    pointer_software_rendering,
+                                    static_channel_chunk_size,
+                                    window_support_level,
+                                ));
                             }
-                            stage.set_window_support_level(window_support_level);
-                            dirty.0.clear();
-                            dirty.add(full(&image));
-                            let _ = events.send(json(&RdpEvent::Resized { width: desktop_size.width, height: desktop_size.height }));
-                            break;
                         }
                     }
+                    .await;
+                    let (desktop_size, share_id, enable_server_pointer, pointer_software_rendering, chunk_size, window_support_level) =
+                        match reactivated {
+                            Ok(r) => r,
+                            Err(e) => match requested {
+                                Some(s) => return Ok(Flow::Reconnect(s)),
+                                None => return Err(e),
+                            },
+                        };
+                    requested = None;
+                    image = DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
+                    if !stage.reactivate(
+                        activation.io_channel_id(),
+                        activation.user_channel_id(),
+                        share_id,
+                        enable_server_pointer,
+                        pointer_software_rendering,
+                        chunk_size,
+                    ) {
+                        return Err("Connection lost: the server sent an invalid channel size".into());
+                    }
+                    stage.set_window_support_level(window_support_level);
+                    // Channel data that arrived during the sequence.
+                    for frame in deferred {
+                        for out in stage.process(&mut image, ironrdp_pdu::Action::X224, &frame, None).map_err(|e| session_err(e.report()))? {
+                            if let ActiveStageOutput::ResponseFrame(f) = out {
+                                writer.write_all(&f).await.map_err(session_err)?;
+                            }
+                        }
+                    }
+                    dirty.0.clear();
+                    dirty.add(full(&image));
+                    let _ = events.send(json(&RdpEvent::Resized { width: desktop_size.width, height: desktop_size.height }));
                 }
                 ActiveStageOutput::Terminate(reason) => {
                     use ironrdp_session::GracefulDisconnectReason as R;
@@ -633,6 +675,36 @@ async fn run(
                 _ => {}
             }
         }
+    }
+}
+
+/// One step of the Deactivation-Reactivation Sequence. Screen updates the
+/// server still sends for the old screen are skipped, and virtual channel
+/// data (sound, clipboard…) is kept in `deferred` for after the sequence,
+/// instead of failing it (FreeRDP's server sends both meanwhile).
+async fn reactivation_step<S: ironrdp_tokio::FramedRead>(
+    reader: &mut ironrdp_tokio::Framed<S>,
+    activation: &mut ironrdp_connector::connection_activation::ConnectionActivationSequence,
+    buf: &mut WriteBuf,
+    deferred: &mut Vec<ironrdp_tokio::bytes::BytesMut>,
+) -> Result<ironrdp_connector::Written, String> {
+    buf.clear();
+    if activation.next_pdu_hint().is_none() {
+        return activation.step_no_input(buf).map_err(session_err);
+    }
+    loop {
+        let (action, payload) = reader.read_pdu().await.map_err(session_err)?;
+        if action == ironrdp_pdu::Action::FastPath {
+            continue;
+        }
+        let channel = ironrdp_core::decode::<ironrdp_pdu::x224::X224<ironrdp_pdu::mcs::SendDataIndication<'_>>>(&payload)
+            .ok()
+            .map(|p| p.0.channel_id);
+        if channel.is_some_and(|c| c != activation.io_channel_id()) {
+            deferred.push(payload);
+            continue;
+        }
+        return activation.step(&payload, reader.last_read_at(), buf).map_err(|e| session_err(e.report()));
     }
 }
 

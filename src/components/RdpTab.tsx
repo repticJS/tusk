@@ -211,7 +211,7 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
   }, [active, tab.id]);
 
   useEffect(() => {
-    if (fullScreen) setTimeout(() => canvasRef.current?.focus(), 80);
+    if (fullScreen) setTimeout(() => canvasRef.current?.focus({ preventScroll: true }), 80);
   }, [fullScreen]);
 
   // ---- input ----
@@ -253,7 +253,7 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
     if (!connected) return;
     e.preventDefault();
     if (down) {
-      canvasRef.current?.focus();
+      canvasRef.current?.focus({ preventScroll: true });
       canvasRef.current?.setPointerCapture(e.pointerId);
     }
     moves.current = toDesk(e);
@@ -294,7 +294,7 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
 
   const sendKeys = (keys: number[]) => {
     send([...keys.map((code): RdpInput => ({ t: "k", code, down: true })), ...[...keys].reverse().map((code): RdpInput => ({ t: "k", code, down: false }))]);
-    canvasRef.current?.focus();
+    canvasRef.current?.focus({ preventScroll: true });
   };
 
   const toggleFullScreen = () => useApp.getState().setFullScreenTab(fullScreen ? null : tab.id);

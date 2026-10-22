@@ -122,9 +122,10 @@ export function Sidebar() {
 
   return (
     <div className="flex h-full flex-col bg-panel">
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
-        <img src="/icon.svg" alt="" className="h-5 w-5" />
-        <span className="text-[13.5px] font-semibold tracking-tight">Tusk</span>
+      {/* The name gives way to the buttons when the sidebar is narrow. */}
+      <div className="@container flex h-11 shrink-0 items-center gap-0.5 overflow-hidden border-b border-border px-2.5">
+        <img src="/icon.svg" alt="" className="mr-1.5 h-5 w-5 shrink-0" />
+        <span className="hidden text-[13.5px] font-semibold tracking-tight @[270px]:inline">Tusk</span>
         <div className="flex-1" />
         <DropdownButton
           className="btn-ghost h-7 px-1.5"

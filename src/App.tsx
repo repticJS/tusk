@@ -150,7 +150,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       <Group orientation="horizontal" className="min-h-0 flex-1">
-        <Panel defaultSize="260px" minSize="180px" maxSize="50%">
+        <Panel defaultSize="260px" minSize="236px" maxSize="50%">
           <Sidebar />
         </Panel>
         <Separator className="w-px" />
