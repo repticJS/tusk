@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0
+
+- File manager: a FileZilla-style Files tab with this PC on one side and a server on the other. Drag files and folders between them, or double-click to transfer.
+- Works over SFTP through your SSH hosts, and with FTP and FTPS sites, which you save in the sidebar (+ → New FTP site), put in folders and share like SSH hosts.
+- Transfer queue with progress, speed, time left, cancel and retry. Choose what happens when a file already exists: ask, overwrite, overwrite if newer, or skip.
+- Edit server files in a tab, rename, create folders, delete, sort, filter and show hidden files on either side.
+
 ## 0.11.0
 
 - Services: Discover lists each server's systemd services, failed first. Start, stop, restart, reload, enable or disable them, and follow their logs (journal) in a terminal.

@@ -25,7 +25,7 @@ export interface Folder {
   parentId?: string | null;
 }
 
-export type ItemKind = "connection" | "ssh" | "folder";
+export type ItemKind = "connection" | "ssh" | "ftp" | "folder";
 
 export const folderApi = {
   list: () => call<Folder[]>("list_folders"),
@@ -43,6 +43,7 @@ export interface ShareCounts {
   sshHosts: number;
   tunnels: number;
   commands?: number;
+  ftpSites?: number;
 }
 
 export interface ShareInfo {
@@ -51,6 +52,7 @@ export interface ShareInfo {
   /** SSH hosts from outside the folder that its connections go through. */
   extraHosts: string[];
   passwords: number;
+  ftpPasswords: number;
   sshSecrets: number;
   keyFiles: number;
 }
@@ -622,6 +624,8 @@ export interface SftpEntry {
   mtime?: number | null;
   mode: string;
   owner?: string | null;
+  /** Dot files, or files marked hidden on Windows. */
+  hidden?: boolean;
 }
 
 export interface SftpListing {
@@ -656,6 +660,105 @@ export const sftpApi = {
     return call<void>("sftp_upload", { termId, transferId, local, remoteDir, events });
   },
   cancel: (transferId: string) => call<void>("sftp_cancel", { transferId }),
+};
+
+// ---- file manager ----
+
+export type FtpProtocol = "ftp" | "ftps";
+
+export interface FtpSite {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  protocol: FtpProtocol;
+  savePassword: boolean;
+  /** Accept self-signed or otherwise untrusted FTPS certificates. */
+  acceptInvalidCerts: boolean;
+  startDir?: string | null;
+  color?: string | null;
+  folderId?: string | null;
+}
+
+/** What a Files tab is connected to. */
+export interface FilesTarget {
+  kind: "ssh" | "ftp";
+  id: string;
+}
+
+/** What to do when a file already exists at the destination. */
+export type OverwritePolicy = "overwrite" | "skip" | "newer";
+
+export interface LocalListing extends SftpListing {
+  parent?: string | null;
+  sep: string;
+}
+
+export interface TransferResult {
+  files: number;
+  skipped: number;
+}
+
+export interface RemoteSource {
+  path: string;
+  dir: boolean;
+  size: number;
+  mtime?: number | null;
+}
+
+export const ftpApi = {
+  list: () => call<FtpSite[]>("list_ftp_sites"),
+  save: (site: FtpSite, password: string | null) => call<void>("save_ftp_site", { site, password }),
+  remove: (id: string) => call<void>("delete_ftp_site", { id }),
+  setPassword: (id: string, password: string, save: boolean) => call<void>("set_ftp_password", { id, password, save }),
+};
+
+export const filesApi = {
+  /** Connects; SSH problems are raised for withSshPrompts, FTP ones as FTP_* kinds. */
+  open: (sessionId: string, target: FilesTarget) =>
+    call<{ path: string; home: string }>("files_open", { sessionId, kind: target.kind, id: target.id }),
+  close: (sessionId: string) => call<void>("files_close", { sessionId }),
+  list: (sessionId: string, path: string) => call<SftpListing>("files_list", { sessionId, path }),
+  mkdir: (sessionId: string, path: string) => call<void>("files_mkdir", { sessionId, path }),
+  rename: (sessionId: string, from: string, to: string) => call<void>("files_rename", { sessionId, from, to }),
+  remove: (sessionId: string, paths: string[]) => call<void>("files_delete", { sessionId, paths }),
+  readText: (sessionId: string, path: string) =>
+    call<{ content?: string | null; size: number; reason?: string | null }>("files_read_text", { sessionId, path }),
+  writeText: (sessionId: string, path: string, content: string) => call<void>("files_write_text", { sessionId, path, content }),
+  download(
+    sessionId: string,
+    transferId: string,
+    sources: RemoteSource[],
+    localDir: string,
+    policy: OverwritePolicy,
+    onProgress: (p: TransferProgress) => void,
+  ) {
+    const events = new Channel<TransferProgress>();
+    events.onmessage = onProgress;
+    return call<TransferResult>("files_download", { sessionId, transferId, sources, localDir, policy, events });
+  },
+  upload(
+    sessionId: string,
+    transferId: string,
+    local: string[],
+    remoteDir: string,
+    policy: OverwritePolicy,
+    onProgress: (p: TransferProgress) => void,
+  ) {
+    const events = new Channel<TransferProgress>();
+    events.onmessage = onProgress;
+    return call<TransferResult>("files_upload", { sessionId, transferId, local, remoteDir, policy, events });
+  },
+  cancel: (transferId: string) => call<void>("sftp_cancel", { transferId }),
+};
+
+export const localFsApi = {
+  /** "" is the home folder; on Windows "This PC" lists the drives. */
+  list: (path: string) => call<LocalListing>("local_list", { path }),
+  mkdir: (path: string) => call<void>("local_mkdir", { path }),
+  rename: (from: string, to: string) => call<void>("local_rename", { from, to }),
+  remove: (paths: string[]) => call<void>("local_delete", { paths }),
 };
 
 /** Joins a remote POSIX directory and name. */

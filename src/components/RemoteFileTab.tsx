@@ -19,7 +19,7 @@ import type { EditorView } from "@codemirror/view";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Check, FileWarning, RotateCw, Save } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { sftpApi } from "../lib/api";
+import { filesApi, sftpApi } from "../lib/api";
 import { useApp, type RemoteFileTab as RemoteFileTabT } from "../store";
 import { SqlEditor } from "./SqlEditor";
 import { Spinner } from "./ui";
@@ -66,7 +66,7 @@ function languageFor(path: string): { ext: Extension | null; label: string } {
 export function RemoteFileTab({ tab, active }: { tab: RemoteFileTabT; active: boolean }) {
   const showToast = useApp((s) => s.showToast);
   const setDirty = useApp((s) => s.setDirty);
-  const host = useApp((s) => s.sshHosts.find((h) => h.id === tab.hostId));
+  const host = useApp((s) => s.sshHosts.find((h) => h.id === tab.hostId) ?? s.ftpSites.find((f) => f.id === tab.hostId));
   const [original, setOriginal] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [state, setState] = useState<"loading" | "ready" | "saving" | "error">("loading");
@@ -87,7 +87,7 @@ export function RemoteFileTab({ tab, active }: { tab: RemoteFileTabT; active: bo
     setState("loading");
     setProblem(null);
     try {
-      const f = await sftpApi.readText(tab.termId, tab.path);
+      const f = tab.filesId ? await filesApi.readText(tab.filesId, tab.path) : await sftpApi.readText(tab.termId, tab.path);
       if (f.content == null) {
         setProblem(f.reason ?? "can't be edited");
         setState("error");
@@ -100,7 +100,7 @@ export function RemoteFileTab({ tab, active }: { tab: RemoteFileTabT; active: bo
       setProblem(e instanceof Error ? e.message : String(e));
       setState("error");
     }
-  }, [tab.termId, tab.path]);
+  }, [tab.termId, tab.filesId, tab.path]);
 
   useEffect(() => {
     void load();
@@ -110,7 +110,8 @@ export function RemoteFileTab({ tab, active }: { tab: RemoteFileTabT; active: bo
     const content = textRef.current;
     setState("saving");
     try {
-      await sftpApi.writeText(tab.termId, tab.path, content);
+      if (tab.filesId) await filesApi.writeText(tab.filesId, tab.path, content);
+      else await sftpApi.writeText(tab.termId, tab.path, content);
       setOriginal(content);
       setSavedAt(Date.now());
       setState("ready");
@@ -118,13 +119,15 @@ export function RemoteFileTab({ tab, active }: { tab: RemoteFileTabT; active: bo
       setState("ready");
       showToast(`Couldn't save ${tab.title}: ${e instanceof Error ? e.message : String(e)}`, "error");
     }
-  }, [tab.termId, tab.path, tab.title, showToast]);
+  }, [tab.termId, tab.filesId, tab.path, tab.title, showToast]);
 
   const downloadInstead = async () => {
     const dir = await openDialog({ directory: true, title: "Download to folder" });
     if (typeof dir !== "string") return;
     try {
-      await sftpApi.download(tab.termId, `dl-${tab.id}`, [tab.path], dir, () => {});
+      if (tab.filesId)
+        await filesApi.download(tab.filesId, `dl-${tab.id}`, [{ path: tab.path, dir: false, size: 0 }], dir, "overwrite", () => {});
+      else await sftpApi.download(tab.termId, `dl-${tab.id}`, [tab.path], dir, () => {});
       showToast(`Downloaded ${tab.title} to ${dir}`, "ok");
     } catch (e) {
       showToast(e instanceof Error ? e.message : String(e), "error");

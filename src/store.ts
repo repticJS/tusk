@@ -3,7 +3,9 @@ import { persist } from "zustand/middleware";
 import {
   api,
   DbError,
+  filesApi,
   folderApi,
+  ftpApi,
   localApi,
   sshApi,
   tunnelApi,
@@ -17,7 +19,9 @@ import {
   type ContainerAction,
   type ContainerInfo,
   type ConnectionConfig,
+  type FilesTarget,
   type Folder,
+  type FtpSite,
   type ItemKind,
   type MonitorSettings,
   type MonitorView,
@@ -146,14 +150,26 @@ export interface TerminalOptions {
   title?: string;
 }
 
-/** A remote file opened for editing over a terminal's SFTP connection. */
+/** A remote file opened for editing over a terminal's SFTP connection, or a
+ * Files tab's connection (`filesId`). */
 export interface RemoteFileTab {
   id: string;
   kind: "remote";
   title: string;
   termId: string;
+  /** SSH host, or FTP site for a Files tab on one. */
   hostId: string;
   path: string;
+  filesId?: string;
+}
+
+/** File manager: this PC on one side, a server (SFTP or FTP) on the other. */
+export interface FilesTab {
+  id: string;
+  kind: "files";
+  title: string;
+  /** null until a server is picked. */
+  target: FilesTarget | null;
 }
 
 /** The SSH tunnel manager (one at most). */
@@ -165,7 +181,17 @@ export interface TunnelsTab {
 
 /** Tabs bound to a database connection. */
 export type DbTab = QueryTab | TableTab | ActivityTab;
-export type Tab = DbTab | TerminalTab | LocalTab | RemoteFileTab | TunnelsTab | DiscoverTab | MonitorTab | CommandsTab | RunTab;
+export type Tab =
+  | DbTab
+  | TerminalTab
+  | LocalTab
+  | RemoteFileTab
+  | FilesTab
+  | TunnelsTab
+  | DiscoverTab
+  | MonitorTab
+  | CommandsTab
+  | RunTab;
 
 /** Tabs with a terminal in them. */
 export const isTermTab = (t: Tab | undefined): t is TerminalTab | LocalTab =>
@@ -235,6 +261,7 @@ interface State {
   statsBar: boolean;
   connections: ConnectionConfig[];
   sshHosts: SshHost[];
+  ftpSites: FtpSite[];
   folders: Folder[];
   /** Folder ids the user has collapsed (folders start open). */
   collapsedFolders: string[];
@@ -272,6 +299,7 @@ interface State {
   /** `password` prefills the password field (from a scanned container). */
   connectionDialog: { open: boolean; editing?: ConnectionConfig; password?: string };
   sshDialog: { open: boolean; editing?: SshHost };
+  ftpDialog: { open: boolean; editing?: FtpSite };
   tunnelDialog: { open: boolean; editing?: Partial<TunnelConfig> };
   /** Folder being shared. */
   shareFolderId: string | null;
@@ -293,7 +321,15 @@ interface State {
   closeSshDialog(): void;
   deleteSshHost(id: string): Promise<void>;
   openTerminalTab(hostId: string, opts?: TerminalOptions): void;
-  openRemoteFile(termId: string, hostId: string, path: string): void;
+  openRemoteFile(termId: string, hostId: string, path: string, filesId?: string): void;
+  openFtpDialog(editing?: FtpSite): void;
+  closeFtpDialog(): void;
+  deleteFtpSite(id: string): Promise<void>;
+  /** Opens a Files tab, connected to `target` when given (reusing an open one). */
+  openFilesTab(target?: FilesTarget | null): void;
+  setFilesTarget(tabId: string, target: FilesTarget | null): void;
+  /** Connects a Files tab's session, prompting for passwords, host keys and certificates. */
+  connectFiles(sessionId: string, target: FilesTarget): Promise<{ path: string; home: string }>;
   setFilePanel(patch: Partial<FilePanelPrefs>): void;
   setStatsBar(on: boolean): void;
   setDirty(id: string, dirty: boolean): void;
@@ -413,6 +449,7 @@ export const useApp = create<State>()(
       statsBar: true,
       connections: [],
       sshHosts: [],
+      ftpSites: [],
       folders: [],
       collapsedFolders: [],
       renamingFolderId: null,
@@ -439,6 +476,7 @@ export const useApp = create<State>()(
       discoverFocus: null,
       connectionDialog: { open: false },
       sshDialog: { open: false },
+      ftpDialog: { open: false },
       tunnelDialog: { open: false },
       shareFolderId: null,
       importDialog: null,
@@ -457,29 +495,32 @@ export const useApp = create<State>()(
       setRowLimit: (rowLimit) => set({ rowLimit }),
 
       async loadConnections() {
-        const [connections, sshHosts, folders, tunnels, commands] = await Promise.all([
+        const [connections, sshHosts, folders, tunnels, commands, ftpSites] = await Promise.all([
           api.listConnections(),
           sshApi.list(),
           folderApi.list(),
           tunnelApi.list(),
           commandsApi.list(),
+          ftpApi.list(),
         ]);
         // Drop tabs whose connection or host no longer exists.
-        const ids = new Set([...connections.map((c) => c.id), ...sshHosts.map((h) => h.id)]);
+        const ids = new Set([...connections.map((c) => c.id), ...sshHosts.map((h) => h.id), ...ftpSites.map((f) => f.id)]);
         const tabs = get().tabs.filter(
           (t) =>
-            t.kind === "tunnels" ||
-            t.kind === "discover" ||
-            t.kind === "monitor" ||
-            t.kind === "commands" ||
-            t.kind === "run" ||
-            t.kind === "local" ||
-            ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId),
+            t.kind === "files"
+              ? !t.target || ids.has(t.target.id)
+              : t.kind === "tunnels" ||
+                t.kind === "discover" ||
+                t.kind === "monitor" ||
+                t.kind === "commands" ||
+                t.kind === "run" ||
+                t.kind === "local" ||
+                ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId),
         );
         const activeTabId = tabs.some((t) => t.id === get().activeTabId)
           ? get().activeTabId
           : (tabs[0]?.id ?? null);
-        set({ connections, sshHosts, folders, tunnels, commands, tabs, activeTabId });
+        set({ connections, sshHosts, ftpSites, folders, tunnels, commands, tabs, activeTabId });
       },
 
       openConnectionDialog: (editing, password) => set({ connectionDialog: { open: true, editing, password } }),
@@ -519,12 +560,68 @@ export const useApp = create<State>()(
         }));
       },
 
-      openRemoteFile(termId, hostId, path) {
-        const existing = get().tabs.find((t) => t.kind === "remote" && t.termId === termId && t.path === path);
+      openRemoteFile(termId, hostId, path, filesId) {
+        const existing = get().tabs.find(
+          (t) => t.kind === "remote" && t.termId === termId && t.filesId === filesId && t.path === path,
+        );
         if (existing) return set({ activeTabId: existing.id });
         const id = uid();
-        const tab: RemoteFileTab = { id, kind: "remote", termId, hostId, path, title: path.split("/").pop() || path };
+        const tab: RemoteFileTab = { id, kind: "remote", termId, hostId, path, filesId, title: path.split("/").pop() || path };
         set((s) => ({ tabs: [...s.tabs, tab], activeTabId: id }));
+      },
+
+      openFtpDialog: (editing) => set({ ftpDialog: { open: true, editing } }),
+      closeFtpDialog: () => set({ ftpDialog: { open: false } }),
+
+      async deleteFtpSite(id) {
+        try {
+          await ftpApi.remove(id);
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+          return;
+        }
+        await get().loadConnections();
+      },
+
+      openFilesTab(target = null) {
+        const name = (t: FilesTarget) =>
+          (t.kind === "ssh" ? get().sshHosts.find((h) => h.id === t.id) : get().ftpSites.find((f) => f.id === t.id))?.name ?? "Files";
+        if (target) {
+          const existing = get().tabs.find((t) => t.kind === "files" && t.target?.kind === target.kind && t.target.id === target.id);
+          if (existing) return set({ activeTabId: existing.id });
+        }
+        const tab: FilesTab = { id: uid(), kind: "files", title: target ? name(target) : "Files", target };
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
+      },
+
+      setFilesTarget(tabId, target) {
+        const name = target
+          ? ((target.kind === "ssh" ? get().sshHosts : get().ftpSites).find((h) => h.id === target.id)?.name ?? "Files")
+          : "Files";
+        set((s) => ({ tabs: s.tabs.map((t) => (t.id === tabId && t.kind === "files" ? { ...t, target, title: name } : t)) }));
+      },
+
+      async connectFiles(sessionId, target) {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await withSshPrompts(() => filesApi.open(sessionId, target));
+          } catch (e) {
+            const kind = e instanceof DbError ? e.info.kind : null;
+            const site = get().ftpSites.find((f) => f.id === target.id);
+            if (target.kind !== "ftp" || !site || attempt > 4) throw e;
+            if (kind === "FTP_PASSWORD_REQUIRED" || kind === "FTP_AUTH_FAILED") {
+              const r = await get().requestSshSecret({
+                hostId: site.id,
+                what: "password",
+                message: kind === "FTP_AUTH_FAILED" ? (e as DbError).message : undefined,
+              });
+              if (!r) throw e;
+              await ftpApi.setPassword(site.id, r.secret, r.save);
+              continue;
+            }
+            throw e;
+          }
+        }
       },
 
       setFilePanel: (patch) => set((s) => ({ filePanel: { ...s.filePanel, ...patch } })),
@@ -1134,6 +1231,7 @@ export const useApp = create<State>()(
         if (tab?.kind === "query" || tab?.kind === "activity") void api.closeSession(tabSession(tab)).catch(() => {});
         if (tab?.kind === "terminal") void sshApi.close(tab.id).catch(() => {});
         if (tab?.kind === "local") void localApi.close(tab.id).catch(() => {});
+        if (tab?.kind === "files") void filesApi.close(tab.id).catch(() => {});
         set((s) => {
           const idx = s.tabs.findIndex((t) => t.id === id);
           const tabs = s.tabs.filter((t) => t.id !== id);

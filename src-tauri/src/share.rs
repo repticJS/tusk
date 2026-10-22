@@ -1,4 +1,4 @@
-//! Sharing a sidebar folder: its connections, SSH hosts and tunnels (and
+//! Sharing a sidebar folder: its connections, SSH hosts, FTP sites and tunnels (and
 //! subfolders) as a share code or `.tusk` file someone else can import.
 //!
 //! Passwords, SSH secrets and private key files are only included when the
@@ -12,7 +12,7 @@
 
 use crate::error::{AppError, AppResult};
 use crate::ssh::SshConfig;
-use crate::store::{ConnectionConfig, Folder, SavedCommand, Store, TunnelConfig};
+use crate::store::{ConnectionConfig, Folder, FtpSite, SavedCommand, Store, TunnelConfig};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -36,6 +36,8 @@ pub struct Counts {
     pub tunnels: usize,
     #[serde(default)]
     pub commands: usize,
+    #[serde(default)]
+    pub ftp_sites: usize,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
@@ -55,6 +57,9 @@ pub struct Secrets {
     /// Private key files by host id.
     #[serde(default)]
     pub keys: HashMap<String, KeyFile>,
+    /// FTP passwords by site id.
+    #[serde(default)]
+    pub ftp: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -67,6 +72,8 @@ pub struct Bundle {
     /// Saved commands for the shared hosts (limited to those hosts).
     #[serde(default)]
     pub commands: Vec<SavedCommand>,
+    #[serde(default)]
+    pub ftp_sites: Vec<FtpSite>,
     #[serde(default)]
     pub secrets: Option<Secrets>,
 }
@@ -115,6 +122,7 @@ pub struct ExportInfo {
     /// SSH hosts from outside the folder that its connections go through.
     pub extra_hosts: Vec<String>,
     pub passwords: usize,
+    pub ftp_passwords: usize,
     pub ssh_secrets: usize,
     pub key_files: usize,
 }
@@ -163,7 +171,8 @@ pub fn collect(store: &Store, folder_id: &str) -> AppResult<(Bundle, Vec<String>
     for h in &mut ssh_hosts {
         h.key_path = h.key_path.as_deref().map(portable_path);
     }
-    Ok((Bundle { folders, connections, ssh_hosts, tunnels, commands, secrets: None }, extra))
+    let ftp_sites = store.list_ftp().into_iter().filter(|f| inside(&f.folder_id)).collect();
+    Ok((Bundle { folders, connections, ssh_hosts, tunnels, commands, ftp_sites, secrets: None }, extra))
 }
 
 /// "C:\Users\me\.ssh\id" → "~/.ssh/id", so it means the receiver's home.
@@ -183,6 +192,7 @@ pub fn counts(b: &Bundle) -> Counts {
         ssh_hosts: b.ssh_hosts.len(),
         tunnels: b.tunnels.len(),
         commands: b.commands.len(),
+        ftp_sites: b.ftp_sites.len(),
     }
 }
 
@@ -383,6 +393,20 @@ pub fn import(store: &mut Store, bundle: Bundle, parent: Option<String>, keys_di
             store.set_password(&id, Some(p))?;
         }
     }
+    for f in &bundle.ftp_sites {
+        let id = map(&f.id);
+        let password = secrets.ftp.get(&f.id);
+        let site = FtpSite {
+            id: id.clone(),
+            folder_id: folder_of(&f.folder_id, &mut map),
+            save_password: password.is_some(),
+            ..f.clone()
+        };
+        store.upsert_ftp(site)?;
+        if let Some(p) = password {
+            store.set_ftp_password(&id, Some(p))?;
+        }
+    }
     for t in &bundle.tunnels {
         let tunnel = TunnelConfig { id: map(&t.id), host_id: map(&t.host_id), ..t.clone() };
         store.save_tunnel(tunnel)?;
@@ -484,8 +508,23 @@ mod tests {
             confirm: true,
         })
         .unwrap();
+        s.upsert_ftp(FtpSite {
+            id: "cdn".into(),
+            name: "CDN".into(),
+            host: "ftp.example.com".into(),
+            port: 21,
+            user: "upload".into(),
+            protocol: "ftps".into(),
+            save_password: true,
+            accept_invalid_certs: false,
+            start_dir: Some("/public".into()),
+            color: None,
+            folder_id: Some("web".into()),
+        })
+        .unwrap();
         s.set_password("api-db", Some("db-secret")).unwrap();
         s.set_ssh_secret("web-01", Some("ssh-secret")).unwrap();
+        s.set_ftp_password("cdn", Some("ftp-secret")).unwrap();
         s
     }
 
@@ -500,6 +539,7 @@ mod tests {
         assert_eq!(hosts, HashSet::from(["web-01", "bastion"]));
         assert_eq!(extra, ["bastion"]);
         assert_eq!(b.tunnels.len(), 1);
+        assert_eq!(b.ftp_sites.len(), 1);
     }
 
     #[test]
@@ -534,6 +574,11 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].host_ids, [web01.id.clone()]);
         assert_eq!(dest.get_password(&c.id), None);
+        let cdn = &dest.list_ftp()[0];
+        assert_ne!(cdn.id, "cdn");
+        assert_eq!(cdn.folder_id.as_deref(), Some(web.id.as_str()));
+        assert!(!cdn.save_password);
+        assert_eq!(dest.get_ftp_password(&cdn.id), None);
         // Importing again makes a second copy instead of overwriting.
         import(&mut dest, decode(&text, None).unwrap(), None, &std::env::temp_dir()).unwrap();
         assert_eq!(dest.list().len(), 2);
@@ -551,6 +596,7 @@ mod tests {
                 "bastion".into(),
                 KeyFile { name: "id_ed25519".into(), content: "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n".into() },
             )]),
+            ftp: HashMap::from([("cdn".into(), "ftp-secret".into())]),
         });
         assert!(encode("Production", &b, None).is_err());
         assert!(encode("Production", &b, Some("short")).is_err());
@@ -565,6 +611,9 @@ mod tests {
         assert_eq!(dest.get_password(&c.id).as_deref(), Some("db-secret"));
         let web01 = dest.list_ssh().into_iter().find(|h| h.name == "web-01").unwrap();
         assert_eq!(dest.get_ssh_secret(&web01.id).as_deref(), Some("ssh-secret"));
+        let cdn = &dest.list_ftp()[0];
+        assert!(cdn.save_password);
+        assert_eq!(dest.get_ftp_password(&cdn.id).as_deref(), Some("ftp-secret"));
         let bastion = dest.list_ssh().into_iter().find(|h| h.name == "bastion").unwrap();
         let key_path = bastion.key_path.unwrap();
         assert!(key_path.starts_with(keys_dir.to_string_lossy().as_ref()));

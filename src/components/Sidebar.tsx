@@ -31,10 +31,12 @@ import {
   Trash2,
   Waypoints,
   X,
+  FolderSync,
+  Server,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ConnectionConfig, Folder, ItemKind, SshHost } from "../lib/api";
-import { blankConnection, blankSshHost, blankTunnel } from "../lib/defaults";
+import type { ConnectionConfig, Folder, FtpSite, ItemKind, SshHost } from "../lib/api";
+import { blankConnection, blankFtpSite, blankSshHost, blankTunnel } from "../lib/defaults";
 import * as meta from "../lib/meta";
 import { qualified } from "../lib/sql";
 import { clickSuppressed, startTreeDrag, useTreeDrag, type DragItem } from "../lib/treeDrag";
@@ -51,6 +53,7 @@ function compact(n: number): string {
 export function Sidebar() {
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
+  const ftpSites = useApp((s) => s.ftpSites);
   const folders = useApp((s) => s.folders);
   const shells = useApp((s) => s.shells);
   const status = useApp((s) => s.status);
@@ -92,6 +95,11 @@ export function Sidebar() {
         keep.add(h.id);
         addPath(h.folderId);
       }
+    for (const f of ftpSites)
+      if (f.name.toLowerCase().includes(q) || f.host.toLowerCase().includes(q)) {
+        keep.add(f.id);
+        addPath(f.folderId);
+      }
     for (const c of connections)
       if (c.name.toLowerCase().includes(q) || c.host.toLowerCase().includes(q) || status[c.id]?.state === "connected") {
         keep.add(c.id);
@@ -99,7 +107,7 @@ export function Sidebar() {
       }
     for (const f of folders) if (f.name.toLowerCase().includes(q)) addPath(f.id);
     return keep;
-  }, [q, folders, sshHosts, connections, status]);
+  }, [q, folders, sshHosts, ftpSites, connections, status]);
 
   const onDrop = (item: DragItem, folderId: string | null) => {
     if (item.kind === "folder" && item.id === folderId) return;
@@ -107,7 +115,7 @@ export function Sidebar() {
   };
 
   const tree: TreeCtx = { q, visible, expanded, toggle, openMenu, onDrop, onMove: setMoving };
-  const empty = connections.length === 0 && sshHosts.length === 0 && folders.length === 0;
+  const empty = connections.length === 0 && sshHosts.length === 0 && ftpSites.length === 0 && folders.length === 0;
 
   return (
     <div className="flex h-full flex-col bg-panel">
@@ -136,6 +144,9 @@ export function Sidebar() {
         >
           <Radar size={15} />
         </button>
+        <button className="btn-ghost h-7 px-1.5" title="File manager" onClick={() => useApp.getState().openFilesTab()}>
+          <FolderSync size={15} />
+        </button>
         <button className="btn-ghost h-7 px-1.5" title="SSH tunnels" onClick={() => useApp.getState().openTunnelsTab()}>
           <Waypoints size={15} />
         </button>
@@ -146,6 +157,7 @@ export function Sidebar() {
           items={[
             { label: "New PostgreSQL connection", icon: <Database size={13} />, onClick: () => openConnectionDialog() },
             { label: "New SSH host", icon: <TerminalSquare size={13} />, onClick: () => openSshDialog() },
+            { label: "New FTP site", icon: <Server size={13} />, onClick: () => useApp.getState().openFtpDialog() },
             "separator",
             { label: "New folder", icon: <FolderPlus size={13} />, onClick: () => void createFolder(null) },
             { label: "New command…", icon: <Zap size={13} />, onClick: () => useApp.getState().openCommandDialog() },
@@ -183,6 +195,7 @@ export function Sidebar() {
           openMenu(e, [
             { label: "New PostgreSQL connection", icon: <Database size={13} />, onClick: () => openConnectionDialog() },
             { label: "New SSH host", icon: <TerminalSquare size={13} />, onClick: () => openSshDialog() },
+            { label: "New FTP site", icon: <Server size={13} />, onClick: () => useApp.getState().openFtpDialog() },
             { label: "New folder", icon: <FolderPlus size={13} />, onClick: () => void createFolder(null) },
           ]);
         }}
@@ -226,12 +239,14 @@ function FolderContents({ parentId, depth, tree }: { parentId: string | null; de
   const folders = useApp((s) => s.folders);
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
+  const ftpSites = useApp((s) => s.ftpSites);
   const inHere = (f?: string | null) => (f ?? null) === parentId;
   const show = (id: string) => !tree.visible || tree.visible.has(id);
   const subfolders = folders.filter((f) => inHere(f.parentId) && show(f.id)).sort(byName);
   const items = [
     ...connections.filter((c) => inHere(c.folderId) && show(c.id)).map((c) => ({ name: c.name, conn: c })),
     ...sshHosts.filter((h) => inHere(h.folderId) && show(h.id)).map((h) => ({ name: h.name, host: h })),
+    ...ftpSites.filter((f) => inHere(f.folderId) && show(f.id)).map((f) => ({ name: f.name, site: f })),
   ].sort(byName);
   return (
     <>
@@ -256,6 +271,10 @@ function FolderContents({ parentId, depth, tree }: { parentId: string | null; de
           <div key={it.host.id} data-drop={parentId ?? ""}>
             <SshNode host={it.host} depth={depth} openMenu={tree.openMenu} onDrop={tree.onDrop} onMove={tree.onMove} />
           </div>
+        ) : "site" in it && it.site ? (
+          <div key={it.site.id} data-drop={parentId ?? ""}>
+            <FtpNode site={it.site} depth={depth} openMenu={tree.openMenu} onDrop={tree.onDrop} onMove={tree.onMove} />
+          </div>
         ) : null,
       )}
     </>
@@ -269,7 +288,8 @@ function FolderNode({ folder, depth, tree }: { folder: Folder; depth: number; tr
     (s) =>
       s.folders.filter((f) => f.parentId === folder.id).length +
       s.connections.filter((c) => c.folderId === folder.id).length +
-      s.sshHosts.filter((h) => h.folderId === folder.id).length,
+      s.sshHosts.filter((h) => h.folderId === folder.id).length +
+      s.ftpSites.filter((f) => f.folderId === folder.id).length,
   );
   const toggleFolder = useApp((s) => s.toggleFolder);
   const renameFolder = useApp((s) => s.renameFolder);
@@ -311,6 +331,11 @@ function FolderNode({ folder, depth, tree }: { folder: Folder; depth: number; tr
               label: "New PostgreSQL connection here",
               icon: <Database size={13} />,
               onClick: () => openConnectionDialog({ ...blankConnection(), folderId: folder.id }),
+            },
+            {
+              label: "New FTP site here",
+              icon: <Server size={13} />,
+              onClick: () => useApp.getState().openFtpDialog({ ...blankFtpSite(), folderId: folder.id }),
             },
             "separator",
             { label: "Share folder…", icon: <Share2 size={13} />, onClick: () => useApp.getState().openShareDialog(folder.id) },
@@ -549,6 +574,11 @@ function SshNode({
         onContextMenu={(e) =>
           openMenu(e, [
             { label: "Open terminal", icon: <TerminalSquare size={13} />, onClick: () => openTerminalTab(host.id) },
+            {
+              label: "Open file manager",
+              icon: <FolderSync size={13} />,
+              onClick: () => useApp.getState().openFilesTab({ kind: "ssh", id: host.id }),
+            },
             monitored
               ? { label: "Stop monitoring", icon: <BellOff size={13} />, onClick: () => void useApp.getState().setMonitored(host.id, false) }
               : { label: "Monitor this host", icon: <BellRing size={13} />, onClick: () => void useApp.getState().setMonitored(host.id, true) },
@@ -618,6 +648,94 @@ function SshNode({
         >
           <div className="p-4 text-[13px]">
             Remove <b>{host.name}</b> ({target}) and its saved credentials from Tusk? Open terminals to it will close.
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+function FtpNode({
+  site,
+  depth,
+  openMenu,
+  onDrop,
+  onMove,
+}: {
+  site: FtpSite;
+  depth: number;
+  openMenu: NodeProps["openMenu"];
+  onDrop: NodeProps["onDrop"];
+  onMove: NodeProps["onMove"];
+}) {
+  const open = () => useApp.getState().openFilesTab({ kind: "ftp", id: site.id });
+  const openTabs = useApp((s) => s.tabs.some((t) => t.kind === "files" && t.target?.kind === "ftp" && t.target.id === site.id));
+  const isActive = useApp((s) => {
+    const t = s.tabs.find((x) => x.id === s.activeTabId);
+    return t?.kind === "files" && t.target?.kind === "ftp" && t.target.id === site.id;
+  });
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const target = `${site.protocol}://${site.user ? `${site.user}@` : ""}${site.host}${site.port === 21 ? "" : `:${site.port}`}`;
+  return (
+    <>
+      <Row
+        depth={depth}
+        onPointerDown={(e) => startTreeDrag(e, { kind: "ftp", id: site.id, label: site.name }, onDrop)}
+        active={isActive}
+        icon={
+          <span className="relative">
+            <Server size={14} style={{ color: site.color ?? undefined }} />
+            {openTabs && <span className="absolute -right-0.5 -bottom-0.5 h-1.5 w-1.5 rounded-full bg-ok ring-2 ring-panel" />}
+          </span>
+        }
+        label={<span className="font-medium">{site.name}</span>}
+        right={<span className="font-mono">{site.protocol.toUpperCase()}</span>}
+        title={`${target}\nClick to open the file manager`}
+        onClick={() => !clickSuppressed() && open()}
+        onContextMenu={(e) =>
+          openMenu(e, [
+            { label: "Open file manager", icon: <FolderSync size={13} />, onClick: open },
+            "separator",
+            { label: "Edit…", icon: <Pencil size={13} />, onClick: () => useApp.getState().openFtpDialog(site) },
+            {
+              label: "Duplicate",
+              icon: <Copy size={13} />,
+              onClick: () => useApp.getState().openFtpDialog({ ...site, id: "", name: `${site.name} copy` }),
+            },
+            { label: "Copy address", icon: <Copy size={13} />, onClick: () => void navigator.clipboard.writeText(target) },
+            {
+              label: "Move to…",
+              icon: <FolderInput size={13} />,
+              onClick: () => onMove({ kind: "ftp", id: site.id, label: site.name }),
+            },
+            { label: "Delete…", icon: <Trash2 size={13} />, danger: true, onClick: () => setConfirmDelete(true) },
+          ])
+        }
+      />
+      {confirmDelete && (
+        <Modal
+          title="Delete FTP site"
+          width={420}
+          onClose={() => setConfirmDelete(false)}
+          footer={
+            <>
+              <button className="btn-outline" onClick={() => setConfirmDelete(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn-danger"
+                onClick={() => {
+                  setConfirmDelete(false);
+                  void useApp.getState().deleteFtpSite(site.id);
+                }}
+              >
+                Delete
+              </button>
+            </>
+          }
+        >
+          <div className="p-4 text-[13px]">
+            Remove <b>{site.name}</b> ({target}) and its saved password from Tusk? Files tabs open on it will close.
           </div>
         </Modal>
       )}

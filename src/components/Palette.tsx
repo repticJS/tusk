@@ -1,4 +1,4 @@
-import { Activity, ArrowUpCircle, BellRing, Zap, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radar, Radio } from "lucide-react";
+import { Activity, ArrowUpCircle, BellRing, FolderSync, Server, Zap, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radar, Radio } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { formatDuration } from "../lib/sql";
@@ -55,6 +55,16 @@ export function CommandPalette() {
     out.push({ id: "tunnels", icon: <Waypoints size={14} />, label: "SSH tunnels", run: () => state.openTunnelsTab() });
     out.push({ id: "monitor", icon: <BellRing size={14} />, label: "Monitoring", run: () => state.openMonitorTab() });
     out.push({ id: "commands", icon: <Zap size={14} />, label: "Commands", run: () => state.openCommandsTab() });
+    out.push({ id: "files", icon: <FolderSync size={14} />, label: "File manager", run: () => state.openFilesTab() });
+    for (const f of state.ftpSites) {
+      out.push({
+        id: `ftp-${f.id}`,
+        icon: <Server size={14} />,
+        label: `Files: ${f.name}`,
+        detail: `${f.protocol}://${f.host}`,
+        run: () => state.openFilesTab({ kind: "ftp", id: f.id }),
+      });
+    }
     for (const c of state.commands) {
       out.push({ id: `run-${c.id}`, icon: <Zap size={14} />, label: `Run: ${c.name}`, run: () => state.runCommand(c) });
     }
@@ -94,6 +104,13 @@ export function CommandPalette() {
         label: `SSH: ${h.name}`,
         detail: `${h.user}@${h.host}`,
         run: () => state.openTerminalTab(h.id),
+      });
+      out.push({
+        id: `sftp-${h.id}`,
+        icon: <FolderSync size={14} />,
+        label: `Files: ${h.name}`,
+        detail: "SFTP",
+        run: () => state.openFilesTab({ kind: "ssh", id: h.id }),
       });
     }
     for (const c of state.connections) {

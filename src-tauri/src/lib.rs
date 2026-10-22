@@ -1,6 +1,7 @@
 mod db;
 mod discover;
 mod error;
+mod files;
 mod local;
 mod monitor;
 mod pm2;
@@ -16,7 +17,7 @@ use ssh::{SshConfig, SshSessions};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use error::{AppError, AppResult};
 use std::sync::Mutex;
-use store::{ConnectionConfig, Folder, ItemRef, Store, TunnelConfig};
+use store::{ConnectionConfig, Folder, FtpSite, ItemRef, Store, TunnelConfig};
 use tauri::{Emitter, Manager, State};
 
 struct AppState {
@@ -24,6 +25,7 @@ struct AppState {
     sessions: Sessions,
     ssh: SshSessions,
     transfers: sftp::Transfers,
+    files: files::FileSessions,
     tunnels: std::sync::Arc<tunnel::Tunnels>,
     local: local::LocalTerms,
     /// Shells found on this PC, detected once.
@@ -68,6 +70,13 @@ impl AppState {
         };
         let creds = self.ssh_creds(host_id)?;
         Ok(Some(self.tunnels.db_port(tunnel_id, &config.host, config.port, creds).await?))
+    }
+
+    fn ftp_password(&self, site_id: &str) -> Option<String> {
+        if let Some(p) = self.files.ftp_passwords.lock().unwrap().get(site_id) {
+            return Some(p.clone());
+        }
+        self.store.lock().unwrap().get_ftp_password(site_id)
     }
 
     async fn shells(&self) -> Vec<local::Shell> {
@@ -450,6 +459,11 @@ impl AppState {
                 }
             }
         }
+        for f in &b.ftp_sites {
+            if let Some(p) = self.ftp_password(&f.id) {
+                s.ftp.insert(f.id.clone(), p);
+            }
+        }
         s
     }
 }
@@ -464,6 +478,7 @@ fn share_info(state: State<'_, AppState>, folder_id: String) -> AppResult<share:
         counts: share::counts(&bundle),
         extra_hosts: extra,
         passwords: secrets.passwords.len(),
+        ftp_passwords: secrets.ftp.len(),
         ssh_secrets: secrets.ssh.len(),
         key_files: secrets.keys.len(),
     })
@@ -779,6 +794,182 @@ async fn sftp_upload(
     sftp::upload(&conn, &state.transfers, &transfer_id, &local, &remote_dir, events).await
 }
 
+// ---- file manager ----
+
+#[tauri::command]
+fn list_ftp_sites(state: State<'_, AppState>) -> Vec<FtpSite> {
+    state.store.lock().unwrap().list_ftp()
+}
+
+/// Saves an FTP site. `password` of None leaves a stored one alone.
+#[tauri::command]
+fn save_ftp_site(state: State<'_, AppState>, site: FtpSite, password: Option<String>) -> AppResult<()> {
+    let id = site.id.clone();
+    let save = site.save_password;
+    let store = &mut state.store.lock().unwrap();
+    store.upsert_ftp(site)?;
+    if !save {
+        store.set_ftp_password(&id, None)?;
+        if let Some(p) = password {
+            state.files.ftp_passwords.lock().unwrap().insert(id, p);
+        }
+    } else if let Some(p) = password.as_deref() {
+        store.set_ftp_password(&id, Some(p))?;
+        state.files.ftp_passwords.lock().unwrap().remove(&id);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_ftp_site(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.files.ftp_passwords.lock().unwrap().remove(&id);
+    state.store.lock().unwrap().delete_ftp(&id)
+}
+
+/// Remembers a password typed at a prompt; `save` also stores it.
+#[tauri::command]
+fn set_ftp_password(state: State<'_, AppState>, id: String, password: String, save: bool) -> AppResult<()> {
+    if save {
+        let store = &mut state.store.lock().unwrap();
+        let site = store.get_ftp(&id)?;
+        store.upsert_ftp(FtpSite { save_password: true, ..site })?;
+        store.set_ftp_password(&id, Some(&password))?;
+    }
+    state.files.ftp_passwords.lock().unwrap().insert(id, password);
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesOpened {
+    path: String,
+    home: String,
+}
+
+/// Connects a Files tab to an SSH host (SFTP) or FTP site. Fails with the
+/// SSH_* prompt kinds, FTP_PASSWORD_REQUIRED, FTP_AUTH_FAILED or FTP_TLS
+/// when the user needs to be asked something.
+#[tauri::command]
+async fn files_open(state: State<'_, AppState>, session_id: String, kind: String, id: String) -> AppResult<FilesOpened> {
+    let (remote, start_dir) = match kind.as_str() {
+        "ssh" => {
+            let creds = state.ssh_creds(&id)?;
+            let accept = state.tunnels.take_accepted(&id);
+            let (handle, _) = ssh::connect(&creds.config, creds.secret.as_deref(), accept, &creds.known_hosts, Default::default())
+                .await
+                .map_err(|e| tunnel::ssh_error(e, &creds.config))?;
+            let conn = std::sync::Arc::new(ssh::Connection { handle, sftp: Default::default() });
+            (files::Remote::Sftp(conn), creds.config.start_dir)
+        }
+        "ftp" => {
+            let site = state.store.lock().unwrap().get_ftp(&id)?;
+            let password = match state.ftp_password(&id) {
+                Some(p) => p,
+                None if files::is_anonymous(&site) => "anonymous@".into(),
+                None => return Err(AppError::kind("FTP_PASSWORD_REQUIRED", format!("Password for {}", site.name))),
+            };
+            let ftp = files::ftp_connect(&site, &password).await?;
+            let start = site.start_dir.clone();
+            (files::Remote::ftp(site, password, ftp), start)
+        }
+        other => return Err(AppError::msg(format!("Unknown server type {other}"))),
+    };
+    let (path, home) = remote.start_paths(start_dir.as_deref()).await?;
+    state.files.insert(session_id, remote).await;
+    Ok(FilesOpened { path, home })
+}
+
+#[tauri::command]
+async fn files_close(state: State<'_, AppState>, session_id: String) -> AppResult<()> {
+    state.files.close(&session_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn files_list(state: State<'_, AppState>, session_id: String, path: String) -> AppResult<sftp::Listing> {
+    state.files.get(&session_id).await?.list(&path).await
+}
+
+#[tauri::command]
+async fn files_mkdir(state: State<'_, AppState>, session_id: String, path: String) -> AppResult<()> {
+    state.files.get(&session_id).await?.mkdir(&path).await
+}
+
+#[tauri::command]
+async fn files_rename(state: State<'_, AppState>, session_id: String, from: String, to: String) -> AppResult<()> {
+    state.files.get(&session_id).await?.rename(&from, &to).await
+}
+
+#[tauri::command]
+async fn files_delete(state: State<'_, AppState>, session_id: String, paths: Vec<String>) -> AppResult<()> {
+    state.files.get(&session_id).await?.delete(&paths).await
+}
+
+#[tauri::command]
+async fn files_read_text(state: State<'_, AppState>, session_id: String, path: String) -> AppResult<files::TextFile> {
+    state.files.get(&session_id).await?.read_text(&path).await
+}
+
+#[tauri::command]
+async fn files_write_text(state: State<'_, AppState>, session_id: String, path: String, content: String) -> AppResult<()> {
+    state.files.get(&session_id).await?.write_text(&path, &content).await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn files_download(
+    state: State<'_, AppState>,
+    session_id: String,
+    transfer_id: String,
+    sources: Vec<files::RemoteSource>,
+    local_dir: String,
+    policy: files::Policy,
+    events: Channel<sftp::Progress>,
+) -> AppResult<files::TransferResult> {
+    let remote = state.files.get(&session_id).await?;
+    files::download(&remote, &state.transfers, &transfer_id, &sources, &local_dir, policy, events).await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn files_upload(
+    state: State<'_, AppState>,
+    session_id: String,
+    transfer_id: String,
+    local: Vec<String>,
+    remote_dir: String,
+    policy: files::Policy,
+    events: Channel<sftp::Progress>,
+) -> AppResult<files::TransferResult> {
+    let remote = state.files.get(&session_id).await?;
+    files::upload(&remote, &state.transfers, &transfer_id, &local, &remote_dir, policy, events).await
+}
+
+/// File system calls block; keep them off the async runtime.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> AppResult<T> + Send + 'static) -> AppResult<T> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| AppError::msg(e.to_string()))?
+}
+
+#[tauri::command]
+async fn local_list(path: String) -> AppResult<files::LocalListing> {
+    blocking(move || files::local_list(&path)).await
+}
+
+#[tauri::command]
+async fn local_mkdir(path: String) -> AppResult<()> {
+    blocking(move || files::local_mkdir(&path)).await
+}
+
+#[tauri::command]
+async fn local_rename(from: String, to: String) -> AppResult<()> {
+    blocking(move || files::local_rename(&from, &to)).await
+}
+
+#[tauri::command]
+async fn local_delete(paths: Vec<String>) -> AppResult<()> {
+    blocking(move || files::local_delete(&paths)).await
+}
+
 // ---- discovery ----
 
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -978,6 +1169,7 @@ pub fn run() {
                 sessions: Sessions::new(),
                 ssh: SshSessions::new(),
                 transfers: sftp::Transfers::default(),
+                files: Default::default(),
                 tunnels: Default::default(),
                 local: local::LocalTerms::default(),
                 shells: Mutex::new(None),
@@ -1050,6 +1242,24 @@ pub fn run() {
             sftp_download,
             sftp_upload,
             sftp_cancel,
+            list_ftp_sites,
+            save_ftp_site,
+            delete_ftp_site,
+            set_ftp_password,
+            files_open,
+            files_close,
+            files_list,
+            files_mkdir,
+            files_rename,
+            files_delete,
+            files_read_text,
+            files_write_text,
+            files_download,
+            files_upload,
+            local_list,
+            local_mkdir,
+            local_rename,
+            local_delete,
             ssh_stats,
             discover_local,
             discover_host,

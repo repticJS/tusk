@@ -37,6 +37,8 @@ base64 = "0.22"
 flate2 = "1"
 rand = "0.8"
 tauri-plugin-notification = "2"
+suppaftp = { version = "12", features = ["tokio-rustls-ring"] }
+rustls-platform-verifier = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

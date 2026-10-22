@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const CHUNK: usize = 256 * 1024;
+pub(crate) const CHUNK: usize = 256 * 1024;
 /// Files larger than this open as "download instead" rather than in the editor.
 const MAX_EDIT_BYTES: u64 = 10 * 1024 * 1024;
 
-fn sftp_err(e: impl std::fmt::Display) -> AppError {
+pub(crate) fn sftp_err(e: impl std::fmt::Display) -> AppError {
     AppError::msg(e.to_string())
 }
 
@@ -85,25 +85,27 @@ pub async fn shell_cwd(conn: &Connection) -> AppResult<Option<String>> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
-    name: String,
+    pub name: String,
     /// dir | file | link
-    kind: &'static str,
+    pub kind: &'static str,
     /// For symlinks: whether the target is a directory.
-    link_to_dir: bool,
-    size: u64,
-    mtime: Option<u32>,
-    mode: String,
-    owner: Option<String>,
+    pub link_to_dir: bool,
+    pub size: u64,
+    pub mtime: Option<u32>,
+    pub mode: String,
+    pub owner: Option<String>,
+    /// Dot files, or files marked hidden on Windows.
+    pub hidden: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Listing {
-    path: String,
-    entries: Vec<Entry>,
+    pub path: String,
+    pub entries: Vec<Entry>,
 }
 
-fn mode_string(perm: u32, kind: &str) -> String {
+pub(crate) fn mode_string(perm: u32, kind: &str) -> String {
     let t = match kind {
         "dir" => 'd',
         "link" => 'l',
@@ -127,7 +129,10 @@ pub fn join(dir: &str, name: &str) -> String {
 }
 
 pub async fn list(conn: &Connection, path: &str) -> AppResult<Listing> {
-    let sftp = session(conn).await?;
+    list_with(&*session(conn).await?, path).await
+}
+
+pub async fn list_with(sftp: &SftpSession, path: &str) -> AppResult<Listing> {
     let path = sftp.canonicalize(if path.is_empty() { "." } else { path }).await.map_err(sftp_err)?;
     let dir = sftp.read_dir(path.clone()).await.map_err(sftp_err)?;
     let mut entries = Vec::new();
@@ -145,14 +150,24 @@ pub async fn list(conn: &Connection, path: &str) -> AppResult<Listing> {
         } else {
             "file"
         };
-        let link_to_dir = kind == "link"
-            && sftp.metadata(join(&path, &name)).await.map(|m| m.file_type().is_dir()).unwrap_or(false);
+        let mut size = meta.size.unwrap_or(0);
+        let mut link_to_dir = false;
+        if kind == "link" {
+            // A link's own size is its target's name; show the target's.
+            if let Ok(target) = sftp.metadata(join(&path, &name)).await {
+                link_to_dir = target.file_type().is_dir();
+                if !link_to_dir {
+                    size = target.size.unwrap_or(size);
+                }
+            }
+        }
         entries.push(Entry {
             mode: mode_string(meta.permissions.unwrap_or(0), kind),
+            hidden: name.starts_with('.'),
             name,
             kind,
             link_to_dir,
-            size: meta.size.unwrap_or(0),
+            size,
             mtime: meta.mtime,
             owner: meta.user.clone().or(meta.uid.map(|u| u.to_string())),
         });
@@ -170,7 +185,7 @@ pub async fn rename(conn: &Connection, from: &str, to: &str) -> AppResult<()> {
     session(conn).await?.rename(from, to).await.map_err(sftp_err)
 }
 
-fn remove_tree(sftp: Arc<SftpSession>, path: String) -> BoxFuture<'static, AppResult<()>> {
+pub(crate) fn remove_tree(sftp: Arc<SftpSession>, path: String) -> BoxFuture<'static, AppResult<()>> {
     async move {
         let meta = sftp.symlink_metadata(path.clone()).await.map_err(sftp_err)?;
         if meta.file_type().is_dir() {
@@ -241,12 +256,12 @@ pub struct Transfers {
 }
 
 impl Transfers {
-    fn start(&self, id: &str) -> Arc<AtomicBool> {
+    pub(crate) fn start(&self, id: &str) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
         self.cancel.lock().unwrap().insert(id.to_string(), flag.clone());
         flag
     }
-    fn finish(&self, id: &str) {
+    pub(crate) fn finish(&self, id: &str) {
         self.cancel.lock().unwrap().remove(id);
     }
     pub fn cancel(&self, id: &str) {
@@ -256,7 +271,7 @@ impl Transfers {
     }
 }
 
-struct Reporter {
+pub(crate) struct Reporter {
     events: Channel<Progress>,
     cancel: Arc<AtomicBool>,
     done: u64,
@@ -265,7 +280,11 @@ struct Reporter {
 }
 
 impl Reporter {
-    fn tick(&mut self, n: u64, file: &str, force: bool) -> AppResult<()> {
+    pub(crate) fn new(events: Channel<Progress>, cancel: Arc<AtomicBool>, total: u64) -> Self {
+        Reporter { events, cancel, done: 0, total, last: Instant::now() }
+    }
+
+    pub(crate) fn tick(&mut self, n: u64, file: &str, force: bool) -> AppResult<()> {
         self.done += n;
         if self.cancel.load(Ordering::Relaxed) {
             return Err(AppError::kind("CANCELLED", "Transfer cancelled"));

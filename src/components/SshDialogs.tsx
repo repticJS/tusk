@@ -3,21 +3,20 @@ import { FolderOpen, ShieldAlert, ShieldQuestion } from "lucide-react";
 import { useState } from "react";
 import { sshApi, type SshAuth, type SshHost } from "../lib/api";
 import { useApp } from "../store";
-import { blankConnection, blankSshHost, COLORS } from "../lib/defaults";
+import { blankConnection, blankFtpSite, blankSshHost, COLORS } from "../lib/defaults";
 import { Field, Modal, Spinner } from "./ui";
 
-/** PostgreSQL / SSH switch shown at the top of a new-connection dialog. */
-export function KindSwitch({ value, folderId }: { value: "postgres" | "ssh"; folderId?: string | null }) {
+/** PostgreSQL / SSH / FTP switch shown at the top of a new-connection dialog. */
+export function KindSwitch({ value, folderId }: { value: "postgres" | "ssh" | "ftp"; folderId?: string | null }) {
   const s = useApp.getState();
-  const pick = (v: "postgres" | "ssh") => {
+  const pick = (v: "postgres" | "ssh" | "ftp") => {
     if (v === value) return;
-    if (v === "ssh") {
-      s.closeConnectionDialog();
-      s.openSshDialog({ ...blankSshHost(), folderId });
-    } else {
-      s.closeSshDialog();
-      s.openConnectionDialog({ ...blankConnection(), folderId });
-    }
+    s.closeConnectionDialog();
+    s.closeSshDialog();
+    s.closeFtpDialog();
+    if (v === "ssh") s.openSshDialog({ ...blankSshHost(), folderId });
+    else if (v === "ftp") s.openFtpDialog({ ...blankFtpSite(), folderId });
+    else s.openConnectionDialog({ ...blankConnection(), folderId });
   };
   return (
     <div className="flex rounded-md border border-border p-0.5">
@@ -25,6 +24,7 @@ export function KindSwitch({ value, folderId }: { value: "postgres" | "ssh"; fol
         [
           ["postgres", "PostgreSQL"],
           ["ssh", "SSH"],
+          ["ftp", "FTP"],
         ] as const
       ).map(([v, label]) => (
         <button
@@ -246,7 +246,11 @@ export function SshDialog() {
 export function SshSecretPrompt() {
   const req = useApp((s) => s.sshSecretRequest);
   const resolve = useApp((s) => s.resolveSshSecret);
-  const host = useApp((s) => s.sshHosts.find((h) => h.id === req?.hostId));
+  const sshHost = useApp((s) => s.sshHosts.find((h) => h.id === req?.hostId));
+  // FTP sites ask for their password here too.
+  const ftpSite = useApp((s) => s.ftpSites.find((f) => f.id === req?.hostId));
+  const host = sshHost ?? ftpSite;
+  const defaultPort = sshHost ? 22 : 21;
   const [value, setValue] = useState("");
   const [save, setSave] = useState(false);
   if (!req) return null;
@@ -282,8 +286,8 @@ export function SshSecretPrompt() {
         {req.message && <div className="rounded-md bg-danger-soft px-3 py-2 text-[12.5px] text-danger">{req.message}</div>}
         <div className="text-[12.5px] text-muted">
           {host?.user}@{host?.host}
-          {host && host.port !== 22 ? `:${host.port}` : ""}
-          {req.what === "passphrase" && host?.keyPath && <div className="mt-1 truncate font-mono text-[11.5px]">{host.keyPath}</div>}
+          {host && host.port !== defaultPort ? `:${host.port}` : ""}
+          {req.what === "passphrase" && sshHost?.keyPath && <div className="mt-1 truncate font-mono text-[11.5px]">{sshHost.keyPath}</div>}
         </div>
         <input className="field" type="password" autoFocus value={value} onChange={(e) => setValue(e.target.value)} />
         <label className="flex items-center gap-2 text-[12.5px]">

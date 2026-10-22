@@ -68,11 +68,37 @@ pub struct Folder {
     pub parent_id: Option<String>,
 }
 
+/// A saved FTP or FTPS server for the file manager.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FtpSite {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    /// ftp | ftps (explicit TLS, "AUTH TLS")
+    pub protocol: String,
+    #[serde(default)]
+    pub save_password: bool,
+    /// Accept self-signed or otherwise untrusted FTPS certificates.
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
+    /// Folder the file manager opens in.
+    #[serde(default)]
+    pub start_dir: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Sidebar folder; None is the top level.
+    #[serde(default)]
+    pub folder_id: Option<String>,
+}
+
 /// Something that can be moved between folders.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemRef {
-    /// connection | ssh | folder
+    /// connection | ssh | ftp | folder
     pub kind: String,
     pub id: String,
 }
@@ -90,6 +116,8 @@ struct StoreFile {
     monitor: MonitorSettings,
     #[serde(default)]
     commands: Vec<SavedCommand>,
+    #[serde(default)]
+    ftp_sites: Vec<FtpSite>,
 }
 
 /// A named shell script to run on one or more SSH hosts (deploys, restarts…).
@@ -238,6 +266,50 @@ impl Store {
         Ok(())
     }
 
+    // ---- FTP sites ----
+
+    pub fn list_ftp(&self) -> Vec<FtpSite> {
+        self.file.ftp_sites.clone()
+    }
+
+    pub fn get_ftp(&self, id: &str) -> AppResult<FtpSite> {
+        self.file
+            .ftp_sites
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+            .ok_or_else(|| AppError::msg(format!("Unknown FTP site {id}")))
+    }
+
+    pub fn upsert_ftp(&mut self, site: FtpSite) -> AppResult<()> {
+        if site.host.trim().is_empty() {
+            return Err(AppError::msg("Enter the server's address"));
+        }
+        if !matches!(site.protocol.as_str(), "ftp" | "ftps") {
+            return Err(AppError::msg(format!("Unknown protocol {}", site.protocol)));
+        }
+        match self.file.ftp_sites.iter_mut().find(|c| c.id == site.id) {
+            Some(existing) => *existing = site,
+            None => self.file.ftp_sites.push(site),
+        }
+        self.save()
+    }
+
+    pub fn delete_ftp(&mut self, id: &str) -> AppResult<()> {
+        self.file.ftp_sites.retain(|c| c.id != id);
+        self.save()?;
+        secret::delete(&self.dir, &ftp_secret_key(id));
+        Ok(())
+    }
+
+    pub fn get_ftp_password(&self, id: &str) -> Option<String> {
+        secret::get(&self.dir, &ftp_secret_key(id))
+    }
+
+    pub fn set_ftp_password(&self, id: &str, password: Option<&str>) -> AppResult<()> {
+        self.set_password(&ftp_secret_key(id), password)
+    }
+
     // ---- saved commands ----
 
     pub fn list_commands(&self) -> Vec<SavedCommand> {
@@ -382,6 +454,9 @@ impl Store {
         for h in self.file.ssh_hosts.iter_mut().filter(|h| h.folder_id.as_deref() == Some(id)) {
             h.folder_id = parent.clone();
         }
+        for f in self.file.ftp_sites.iter_mut().filter(|f| f.folder_id.as_deref() == Some(id)) {
+            f.folder_id = parent.clone();
+        }
         self.file.folders.retain(|f| f.id != id);
         self.save()
     }
@@ -399,6 +474,11 @@ impl Store {
                 "ssh" => {
                     if let Some(h) = self.file.ssh_hosts.iter_mut().find(|h| h.id == item.id) {
                         h.folder_id = folder_id.clone();
+                    }
+                }
+                "ftp" => {
+                    if let Some(f) = self.file.ftp_sites.iter_mut().find(|f| f.id == item.id) {
+                        f.folder_id = folder_id.clone();
                     }
                 }
                 "folder" => {
@@ -451,6 +531,10 @@ impl Store {
 /// database passwords, under a prefixed name.
 fn ssh_secret_key(id: &str) -> String {
     format!("ssh:{id}")
+}
+
+fn ftp_secret_key(id: &str) -> String {
+    format!("ftp:{id}")
 }
 
 #[cfg(windows)]

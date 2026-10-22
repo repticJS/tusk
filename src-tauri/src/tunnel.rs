@@ -106,7 +106,7 @@ impl Link {
 
 /// Marks an SSH error so the UI can tell it apart from a database error and
 /// knows which host to ask about.
-fn ssh_error(mut e: AppError, host: &SshConfig) -> AppError {
+pub fn ssh_error(mut e: AppError, host: &SshConfig) -> AppError {
     if let Some(kind) = e.kind.take() {
         e.kind = Some(format!("SSH_{kind}"));
     }
@@ -159,6 +159,11 @@ pub struct Tunnels {
 impl Tunnels {
     pub fn accept_host_key(&self, host_id: &str, fingerprint: String) {
         self.accepted.lock().unwrap().insert(host_id.to_string(), fingerprint);
+    }
+
+    /// A host key the user just approved for this host, used once.
+    pub fn take_accepted(&self, host_id: &str) -> Option<String> {
+        self.accepted.lock().unwrap().remove(host_id)
     }
 
     /// Updates the credentials a link reconnects with (after the host is edited

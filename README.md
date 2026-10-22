@@ -64,9 +64,9 @@ The status bar shows how many problems there are, hosts with problems get a warn
 
 ### Sharing folders
 
-Right-click a folder → **Share folder…** to hand its connections, SSH hosts and tunnels (with subfolders, and any SSH hosts its connections go through) to a teammate as a share code or a `.tusk` file. They import it with **+** → **Import shared folder…** and get their own copy; nothing in their sidebar is overwritten.
+Right-click a folder → **Share folder…** to hand its connections, SSH hosts, FTP sites and tunnels (with subfolders, and any SSH hosts its connections go through) to a teammate as a share code or a `.tusk` file. They import it with **+** → **Import shared folder…** and get their own copy; nothing in their sidebar is overwritten.
 
-Passwords, SSH passwords and private key files are left out unless you tick **Include passwords and keys**. Then the share is encrypted with a passphrase you choose (Argon2id + XChaCha20-Poly1305); send the passphrase separately. Imported passwords go to Windows Credential Manager and key files to Tusk's own folder, readable only by you.
+Passwords, SSH and FTP passwords and private key files are left out unless you tick **Include passwords and keys**. Then the share is encrypted with a passphrase you choose (Argon2id + XChaCha20-Poly1305); send the passphrase separately. Imported passwords go to Windows Credential Manager and key files to Tusk's own folder, readable only by you.
 
 ### Discover databases and containers
 
@@ -104,6 +104,20 @@ Every terminal tab has a file panel (toggle with **Files**) that works over the 
 | Files | Double-click to edit remote text files with syntax highlighting (YAML, nginx, shell, JSON, Python, …) and Ctrl+S to save back; rename (F2), new folder, delete (Del) |
 
 In a terminal, Ctrl+W, Ctrl+R and friends go to the shell. Use Ctrl+Shift+T, Ctrl+Shift+W and Ctrl+Shift+P for Tusk's own new tab, close tab and palette.
+
+### File manager (SFTP, FTP, FTPS)
+
+A FileZilla-style **Files** tab (folder button at the top of the sidebar, right-click an SSH host → *Open file manager*, or click an FTP site): this PC on the left, the server on the right.
+
+| Area | What's there |
+|---|---|
+| Servers | SFTP through any saved SSH host (its own connection, no terminal needed), and FTP / FTPS sites saved in the sidebar like everything else (+ → **New FTP site**). FTPS uses explicit TLS; self-signed certificates can be trusted per site |
+| Transfers | Drag files between the sides (onto a folder to put them inside it), double-click a file, or use the arrow buttons. Folders transfer recursively, modification times are kept, and files dropped from Explorer upload too |
+| Queue | Two transfers at a time with progress, speed, time left, cancel and retry |
+| Existing files | Ask, overwrite, overwrite if newer, or skip |
+| Files | Edit server files in a tab (Ctrl+S saves back), rename (F2), new folder, delete (Del), sort by name, size or date, filter, hidden files |
+
+FTP sites can go in folders and be shared like SSH hosts; their passwords are only included in encrypted shares.
 
 ### Shortcuts
 
@@ -152,6 +166,7 @@ src-tauri/src/
   ssh.rs       SSH terminals: connect, host-key checks, auth, PTY shell streamed to the UI
   stats.rs     server performance stats over a terminal's connection (/proc, df)
   sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
+  files.rs     file manager: SFTP / FTP / FTPS sessions, local folders, queued transfers
   monitor.rs   background checks of SSH hosts, problems and alerts
   share.rs     folder share codes: collecting, encryption, importing with new ids
   pm2.rs       PM2 apps: listing (pm2 jlist), actions, new apps, logs/monit terminals
@@ -165,7 +180,7 @@ src/
   lib/meta.ts  catalog introspection queries, DDL generation
   lib/sql.ts   statement splitter, quoting, formatting, export helpers
   store.ts     app state (zustand)
-  components/  Sidebar, QueryTab, TableTab, TerminalTab (xterm.js), SftpPanel, RemoteFileTab, TunnelsTab, DataGrid (Glide), SqlEditor (CodeMirror), dialogs
+  components/  Sidebar, QueryTab, TableTab, TerminalTab (xterm.js), SftpPanel, FilesTab, RemoteFileTab, TunnelsTab, DataGrid (Glide), SqlEditor (CodeMirror), dialogs
 ```
 
 ## Roadmap ideas

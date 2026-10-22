@@ -4,6 +4,7 @@ import {
   BellRing,
   Database,
   FileCode2,
+  FolderSync,
   LayoutGrid,
   Monitor,
   Moon,
@@ -29,6 +30,8 @@ import { Sidebar } from "./components/Sidebar";
 import { HostKeyPrompt, SshDialog, SshSecretPrompt } from "./components/SshDialogs";
 import { TableTab } from "./components/TableTab";
 import { RemoteFileTab } from "./components/RemoteFileTab";
+import { FilesTab } from "./components/FilesTab";
+import { FtpDialog } from "./components/FtpDialog";
 import { TerminalTab } from "./components/TerminalTab";
 import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
 import { DiscoverTab } from "./components/DiscoverTab";
@@ -58,6 +61,7 @@ export default function App() {
   const activeTabId = useApp((s) => s.activeTabId);
   const connectionDialog = useApp((s) => s.connectionDialog);
   const sshDialog = useApp((s) => s.sshDialog);
+  const ftpDialog = useApp((s) => s.ftpDialog);
   const tunnelDialog = useApp((s) => s.tunnelDialog);
   const paletteOpen = useApp((s) => s.paletteOpen);
   const historyOpen = useApp((s) => s.historyOpen);
@@ -186,6 +190,8 @@ export default function App() {
                     <CommandsTab tab={t} active={t.id === activeTabId} />
                   ) : t.kind === "run" ? (
                     <RunTab tab={t} active={t.id === activeTabId} />
+                  ) : t.kind === "files" ? (
+                    <FilesTab tab={t} active={t.id === activeTabId} />
                   ) : (
                     <RemoteFileTab tab={t} active={t.id === activeTabId} />
                   )}
@@ -200,6 +206,7 @@ export default function App() {
       <StatusBar />
       {connectionDialog.open && <ConnectionDialog key={connectionDialog.editing?.id ?? "new"} />}
       {sshDialog.open && <SshDialog key={sshDialog.editing?.id ?? "new"} />}
+      {ftpDialog.open && <FtpDialog key={ftpDialog.editing?.id || "new"} />}
       {tunnelDialog.open && <TunnelDialog key={tunnelDialog.editing?.id || "new"} />}
       <ShareDialog />
       <CommandDialog />
@@ -225,6 +232,7 @@ function TabBar() {
   const closeTabs = useApp((s) => s.closeTabs);
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
+  const ftpSites = useApp((s) => s.ftpSites);
   const dirty = useApp((s) => s.dirty);
   const multiExec = useApp((s) => s.multiExec);
   const [menu, openMenu] = useMenu();
@@ -243,9 +251,11 @@ function TabBar() {
             t.kind === "commands" ||
             t.kind === "run"
               ? undefined
-              : t.kind === "terminal" || t.kind === "remote"
-                ? sshHosts.find((h) => h.id === t.hostId)
-                : connections.find((c) => c.id === t.connId);
+              : t.kind === "files"
+                ? t.target && (t.target.kind === "ssh" ? sshHosts : ftpSites).find((h) => h.id === t.target!.id)
+                : t.kind === "terminal" || t.kind === "remote"
+                  ? (sshHosts.find((h) => h.id === t.hostId) ?? ftpSites.find((f) => f.id === t.hostId))
+                  : connections.find((c) => c.id === t.connId);
           const active = t.id === activeTabId;
           return (
             <div
@@ -274,6 +284,8 @@ function TabBar() {
                     ? "Databases and containers"
                     : t.kind === "monitor"
                       ? "Monitoring"
+                      : t.kind === "files"
+                        ? `Files${conn ? `: ${conn.name}` : ""}`
                       : t.kind === "commands" || t.kind === "run"
                         ? t.title
                   : t.kind === "local"
@@ -309,6 +321,8 @@ function TabBar() {
                   <BellRing size={13} />
                 ) : t.kind === "commands" || t.kind === "run" ? (
                   <Zap size={13} />
+                ) : t.kind === "files" ? (
+                  <FolderSync size={13} />
                 ) : (
                   <FileCode2 size={13} />
                 )}
