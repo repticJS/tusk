@@ -86,6 +86,27 @@ struct StoreFile {
     folders: Vec<Folder>,
     #[serde(default)]
     tunnels: Vec<TunnelConfig>,
+    #[serde(default)]
+    monitor: MonitorSettings,
+}
+
+/// Background checks of SSH hosts.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MonitorSettings {
+    /// Hosts being watched.
+    pub hosts: Vec<String>,
+    pub interval_secs: u32,
+    /// Disk use (%) that raises an alert.
+    pub disk_threshold: u8,
+    /// Show desktop notifications (alerts are listed in Tusk either way).
+    pub notify: bool,
+}
+
+impl Default for MonitorSettings {
+    fn default() -> Self {
+        MonitorSettings { hosts: Vec::new(), interval_secs: 300, disk_threshold: 90, notify: true }
+    }
 }
 
 pub struct Store {
@@ -189,6 +210,23 @@ impl Store {
         self.save()?;
         secret::delete(&self.dir, &ssh_secret_key(id));
         Ok(())
+    }
+
+    // ---- monitoring ----
+
+    pub fn monitor(&self) -> MonitorSettings {
+        let mut m = self.file.monitor.clone();
+        // Forget hosts that were deleted.
+        m.hosts.retain(|h| self.file.ssh_hosts.iter().any(|x| &x.id == h));
+        m
+    }
+
+    pub fn set_monitor(&mut self, mut m: MonitorSettings) -> AppResult<()> {
+        m.interval_secs = m.interval_secs.clamp(60, 24 * 3600);
+        m.disk_threshold = m.disk_threshold.clamp(50, 99);
+        m.hosts.dedup();
+        self.file.monitor = m;
+        self.save()
     }
 
     // ---- tunnels ----

@@ -312,6 +312,61 @@ export const statsApi = {
   processes: (termId: string) => call<{ cpuTotal: number; list: ServerProcess[] }>("ssh_processes", { termId }),
 };
 
+// ---- monitoring ----
+
+export interface MonitorSettings {
+  hosts: string[];
+  intervalSecs: number;
+  diskThreshold: number;
+  notify: boolean;
+}
+
+export interface MonitorProblem {
+  key: string;
+  severity: "warning" | "critical";
+  message: string;
+  since: number;
+}
+
+export interface MonitorHost {
+  hostId: string;
+  checkedAt?: number | null;
+  checking: boolean;
+  reachable?: boolean | null;
+  error?: string | null;
+  problems: MonitorProblem[];
+  disks: { mount: string; percent: number }[];
+  memPercent?: number | null;
+  /** [online, total] */
+  pm2?: [number, number] | null;
+  /** [running, total] */
+  containers?: [number, number] | null;
+  certs: { domain: string; daysLeft: number }[];
+}
+
+export interface MonitorAlert {
+  id: number;
+  at: number;
+  hostId: string;
+  hostName: string;
+  severity: "warning" | "critical" | "ok";
+  message: string;
+  resolved: boolean;
+}
+
+export interface MonitorView {
+  settings: MonitorSettings;
+  hosts: MonitorHost[];
+  alerts: MonitorAlert[];
+}
+
+export const monitorApi = {
+  state: () => call<MonitorView>("monitor_state"),
+  save: (settings: MonitorSettings) => call<void>("monitor_save", { settings }),
+  check: (hostId: string) => call<void>("monitor_check", { hostId }),
+  clearAlerts: () => call<void>("monitor_clear_alerts"),
+};
+
 // ---- discovery ----
 
 export interface FoundDb {

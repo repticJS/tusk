@@ -21,6 +21,9 @@ import {
   Table2,
   TerminalSquare,
   Monitor,
+  AlertTriangle,
+  BellOff,
+  BellRing,
   Download,
   Share2,
   Radar,
@@ -480,6 +483,12 @@ function SshNode({
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const target = `${host.user}@${host.host}${host.port === 22 ? "" : `:${host.port}`}`;
+  const monitored = useApp((s) => !!s.monitor?.settings.hosts.includes(host.id));
+  // Worst problem the monitor found: shown on the row.
+  const health = useApp((s) => {
+    const p = s.monitor?.hosts.find((h) => h.hostId === host.id)?.problems ?? [];
+    return p.some((x) => x.severity === "critical") ? "critical" : p.length ? "warning" : null;
+  });
   return (
     <>
       <Row
@@ -495,12 +504,30 @@ function SshNode({
           </span>
         }
         label={<span className="font-medium">{host.name}</span>}
-        right={<span className="font-mono">{host.host}</span>}
+        right={
+          health ? (
+            <button
+              className="flex items-center"
+              title="Monitoring found problems"
+              onClick={(e) => {
+                e.stopPropagation();
+                useApp.getState().openMonitorTab();
+              }}
+            >
+              <AlertTriangle size={12} className={health === "critical" ? "text-danger" : "text-warn"} />
+            </button>
+          ) : (
+            <span className="font-mono">{host.host}</span>
+          )
+        }
         title={`${target}\nClick to open a terminal`}
         onClick={() => !clickSuppressed() && openTerminalTab(host.id)}
         onContextMenu={(e) =>
           openMenu(e, [
             { label: "Open terminal", icon: <TerminalSquare size={13} />, onClick: () => openTerminalTab(host.id) },
+            monitored
+              ? { label: "Stop monitoring", icon: <BellOff size={13} />, onClick: () => void useApp.getState().setMonitored(host.id, false) }
+              : { label: "Monitor this host", icon: <BellRing size={13} />, onClick: () => void useApp.getState().setMonitored(host.id, true) },
             {
               label: "Scan for databases & containers",
               icon: <Radar size={13} />,

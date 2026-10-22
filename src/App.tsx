@@ -1,5 +1,7 @@
+import { listen } from "@tauri-apps/api/event";
 import {
   Activity,
+  BellRing,
   Database,
   FileCode2,
   LayoutGrid,
@@ -30,6 +32,7 @@ import { TerminalTab } from "./components/TerminalTab";
 import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
 import { DiscoverTab } from "./components/DiscoverTab";
 import { ActivityTab } from "./components/ActivityTab";
+import { MonitorBell, MonitorTab } from "./components/MonitorTab";
 import { ImportDialog, ShareDialog } from "./components/ShareDialogs";
 import { UpdateChip, UpdateDialog, useUpdateChecks } from "./components/Updater";
 import { Modal, useMenu } from "./components/ui";
@@ -72,6 +75,10 @@ export default function App() {
       .loadConnections()
       .then(() => useApp.getState().startAutoTunnels());
     void useApp.getState().loadShells();
+    void useApp.getState().loadMonitor();
+    // The backend checks hosts in the background and says when anything changed.
+    const unlisten = listen("monitor-changed", () => void useApp.getState().loadMonitor());
+    return () => void unlisten.then((f) => f());
   }, []);
 
   // Global shortcuts.
@@ -171,6 +178,8 @@ export default function App() {
                     <TunnelsTab tab={t} active={t.id === activeTabId} />
                   ) : t.kind === "discover" ? (
                     <DiscoverTab tab={t} active={t.id === activeTabId} />
+                  ) : t.kind === "monitor" ? (
+                    <MonitorTab tab={t} active={t.id === activeTabId} />
                   ) : (
                     <RemoteFileTab tab={t} active={t.id === activeTabId} />
                   )}
@@ -219,7 +228,7 @@ function TabBar() {
       <div className="flex min-w-0 flex-1 items-end overflow-x-auto [scrollbar-width:none]">
         {tabs.map((t) => {
           const conn =
-            t.kind === "tunnels" || t.kind === "local" || t.kind === "discover"
+            t.kind === "tunnels" || t.kind === "local" || t.kind === "discover" || t.kind === "monitor"
               ? undefined
               : t.kind === "terminal" || t.kind === "remote"
                 ? sshHosts.find((h) => h.id === t.hostId)
@@ -250,6 +259,8 @@ function TabBar() {
                   ? "SSH tunnels"
                   : t.kind === "discover"
                     ? "Databases and containers"
+                    : t.kind === "monitor"
+                      ? "Monitoring"
                   : t.kind === "local"
                     ? `Local terminal: ${t.title}`
                   : t.kind === "terminal"
@@ -279,6 +290,8 @@ function TabBar() {
                   <Monitor size={13} />
                 ) : t.kind === "discover" ? (
                   <Radar size={13} />
+                ) : t.kind === "monitor" ? (
+                  <BellRing size={13} />
                 ) : (
                   <FileCode2 size={13} />
                 )}
@@ -534,6 +547,7 @@ function StatusBar() {
           <Waypoints size={11} className="text-ok" /> {tunnelCount} tunnel{tunnelCount === 1 ? "" : "s"}
         </button>
       )}
+      <MonitorBell />
       <UpdateChip />
       <button className="flex items-center gap-1 hover:text-text" onClick={() => setPaletteOpen(true)}>
         <Search size={11} /> Ctrl+P

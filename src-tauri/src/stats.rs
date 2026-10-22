@@ -148,7 +148,7 @@ fn parse_snapshot(text: &str) -> Option<Snapshot> {
 
 /// Real disks from `df -P -k`: block devices plus the root filesystem, each
 /// device once (bind mounts repeat it).
-fn parse_df(lines: &[&str]) -> Vec<Disk> {
+pub(crate) fn parse_df(lines: &[&str]) -> Vec<Disk> {
     let mut disks: Vec<Disk> = Vec::new();
     for line in lines.iter().skip(1) {
         let f: Vec<&str> = line.split_whitespace().collect();

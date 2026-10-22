@@ -42,6 +42,18 @@ Open PowerShell, Command Prompt, Git Bash or any WSL distro in a tab from the mo
 
 **Multi-exec** (the antenna button in any terminal's header) sends what you type to several terminals at once, SSH and local alike. Tick which ones take part, and use **Tile** to see them side by side.
 
+### Monitoring
+
+Right-click an SSH host → **Monitor this host**, or open **Monitoring** from the bell in the status bar. While Tusk is open it checks those servers every few minutes (one short command each) and raises a Windows notification when something goes wrong, and again when it's fixed:
+
+- a disk fuller than your threshold (90% by default), memory nearly exhausted
+- failed systemd services
+- PM2 apps or Docker containers that crashed or stopped
+- TLS certificates served by the server (from its nginx or Caddy config) expiring within 14 days
+- the server not answering two checks in a row
+
+The status bar shows how many problems there are, hosts with problems get a warning icon in the sidebar, and the Monitoring tab lists each server's disks, apps and certificates plus the alert history.
+
 ### Sharing folders
 
 Right-click a folder → **Share folder…** to hand its connections, SSH hosts and tunnels (with subfolders, and any SSH hosts its connections go through) to a teammate as a share code or a `.tusk` file. They import it with **+** → **Import shared folder…** and get their own copy; nothing in their sidebar is overwritten.
@@ -132,6 +144,7 @@ src-tauri/src/
   ssh.rs       SSH terminals: connect, host-key checks, auth, PTY shell streamed to the UI
   stats.rs     server performance stats over a terminal's connection (/proc, df)
   sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
+  monitor.rs   background checks of SSH hosts, problems and alerts
   share.rs     folder share codes: collecting, encryption, importing with new ids
   pm2.rs       PM2 apps: listing (pm2 jlist), actions, new apps, logs/monit terminals
   discover.rs  finds databases and Docker containers (ss/netstat/proc, ps, pg_lsclusters, docker)

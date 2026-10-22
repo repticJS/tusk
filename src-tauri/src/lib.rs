@@ -2,6 +2,7 @@ mod db;
 mod discover;
 mod error;
 mod local;
+mod monitor;
 mod pm2;
 mod share;
 mod sftp;
@@ -16,7 +17,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use error::{AppError, AppResult};
 use std::sync::Mutex;
 use store::{ConnectionConfig, Folder, ItemRef, Store, TunnelConfig};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 struct AppState {
     store: Mutex<Store>,
@@ -27,6 +28,7 @@ struct AppState {
     local: local::LocalTerms,
     /// Shells found on this PC, detected once.
     shells: Mutex<Option<Vec<local::Shell>>>,
+    monitor: monitor::Monitor,
 }
 
 impl AppState {
@@ -228,6 +230,109 @@ fn delete_folder(state: State<'_, AppState>, id: String) -> AppResult<()> {
 #[tauri::command]
 fn move_to_folder(state: State<'_, AppState>, items: Vec<ItemRef>, folder_id: Option<String>) -> AppResult<()> {
     state.store.lock().unwrap().move_items(&items, folder_id)
+}
+
+// ---- monitoring ----
+
+/// Checks one host now: records the result, raises alerts and tells the UI.
+async fn check_host(app: tauri::AppHandle, host_id: String) {
+    let state = app.state::<AppState>();
+    let (settings, name) = {
+        let store = state.store.lock().unwrap();
+        (store.monitor(), store.get_ssh(&host_id).map(|h| h.name).unwrap_or_default())
+    };
+    let certs = state.monitor.begin(&host_id);
+    let _ = app.emit("monitor-changed", ());
+    let result = match state.ssh_creds(&host_id) {
+        Err(e) => Err(e.message),
+        // Monitoring never prompts: missing passwords or unknown host keys
+        // show up as the host's error.
+        Ok(creds) => state
+            .tunnels
+            .exec(creds, &ssh::posix(&monitor::script(certs)), std::time::Duration::from_secs(45))
+            .await
+            .map(|(out, _)| monitor::parse(&out))
+            .map_err(|e| e.message),
+    };
+    let alerts = state.monitor.finish(&host_id, &name, result, settings.disk_threshold);
+    if settings.notify && !alerts.is_empty() {
+        notify(&app, &alerts);
+    }
+    let _ = app.emit("monitor-changed", ());
+}
+
+fn notify(app: &tauri::AppHandle, alerts: &[monitor::Alert]) {
+    use tauri_plugin_notification::NotificationExt;
+    let show = |title: &str, body: &str| {
+        let _ = app.notification().builder().title(title).body(body).show();
+    };
+    let host = &alerts[0].host_name;
+    if alerts.len() > 3 {
+        let body: Vec<&str> = alerts.iter().take(3).map(|a| a.message.as_str()).collect();
+        show(&format!("{host}: {} changes", alerts.len()), &format!("{}…", body.join("\n")));
+    } else {
+        for a in alerts {
+            show(host, &a.message);
+        }
+    }
+}
+
+/// Checks monitored hosts when they're due; settings changes wake it early.
+fn start_monitor(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Let the window come up first.
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        loop {
+            let state = app.state::<AppState>();
+            let settings = state.store.lock().unwrap().monitor();
+            for id in state.monitor.due(&settings.hosts, settings.interval_secs as u64) {
+                tauri::async_runtime::spawn(check_host(app.clone(), id));
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => {}
+                _ = state.monitor.wake.notified() => {}
+            }
+        }
+    });
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MonitorView {
+    settings: store::MonitorSettings,
+    hosts: Vec<monitor::HostStatus>,
+    alerts: Vec<monitor::Alert>,
+}
+
+#[tauri::command]
+fn monitor_state(state: State<'_, AppState>) -> MonitorView {
+    let settings = state.store.lock().unwrap().monitor();
+    let hosts = state.monitor.statuses().into_iter().filter(|h| settings.hosts.contains(&h.host_id)).collect();
+    MonitorView { settings, hosts, alerts: state.monitor.alerts() }
+}
+
+#[tauri::command]
+fn monitor_save(state: State<'_, AppState>, settings: store::MonitorSettings) -> AppResult<()> {
+    let before = state.store.lock().unwrap().monitor();
+    for h in before.hosts.iter().filter(|h| !settings.hosts.contains(h)) {
+        state.monitor.forget(h);
+    }
+    state.store.lock().unwrap().set_monitor(settings)?;
+    state.monitor.wake.notify_one();
+    Ok(())
+}
+
+/// Checks a host right away.
+#[tauri::command]
+async fn monitor_check(app: tauri::AppHandle, host_id: String) -> AppResult<()> {
+    check_host(app, host_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+fn monitor_clear_alerts(app: tauri::AppHandle, state: State<'_, AppState>) {
+    state.monitor.clear_alerts();
+    let _ = app.emit("monitor-changed", ());
 }
 
 // ---- sharing folders ----
@@ -725,6 +830,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             app.manage(AppState {
@@ -735,7 +841,9 @@ pub fn run() {
                 tunnels: Default::default(),
                 local: local::LocalTerms::default(),
                 shells: Mutex::new(None),
+                monitor: Default::default(),
             });
+            start_monitor(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -759,6 +867,10 @@ pub fn run() {
             delete_folder,
             move_to_folder,
             share_info,
+            monitor_state,
+            monitor_save,
+            monitor_check,
+            monitor_clear_alerts,
             share_export,
             share_preview,
             share_import,

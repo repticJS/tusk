@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.0
+
+- Monitoring: pick SSH hosts to watch (right-click → Monitor this host). Tusk checks them every few minutes and sends a Windows notification for full disks, low memory, failed services, crashed PM2 apps and containers, certificates about to expire, and servers that stop answering, and again when each is fixed.
+- A bell in the status bar shows the number of problems; the Monitoring tab shows every server's state and the alert history.
+
 ## 0.8.0
 
 - Activity dashboard: right-click a connection or database → Activity & sessions. Live connections, transactions per second, cache hit rate, and every session with its query and how long it's been running.

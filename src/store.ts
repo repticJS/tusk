@@ -8,6 +8,7 @@ import {
   tunnelApi,
   withSshPrompts,
   discoverApi,
+  monitorApi,
   pm2Api,
   type AppErrorInfo,
   type ContainerAction,
@@ -15,6 +16,8 @@ import {
   type ConnectionConfig,
   type Folder,
   type ItemKind,
+  type MonitorSettings,
+  type MonitorView,
   type Pm2Action,
   type ScanResult,
   type SessionRef,
@@ -74,6 +77,13 @@ export interface LocalTab {
   command?: string[];
 }
 
+/** Background monitoring: hosts, problems, alert history. */
+export interface MonitorTab {
+  id: string;
+  kind: "monitor";
+  title: string;
+}
+
 /** Databases and containers found on this PC and the SSH hosts. */
 export interface DiscoverTab {
   id: string;
@@ -113,7 +123,7 @@ export interface TunnelsTab {
 
 /** Tabs bound to a database connection. */
 export type DbTab = QueryTab | TableTab | ActivityTab;
-export type Tab = DbTab | TerminalTab | LocalTab | RemoteFileTab | TunnelsTab | DiscoverTab;
+export type Tab = DbTab | TerminalTab | LocalTab | RemoteFileTab | TunnelsTab | DiscoverTab | MonitorTab;
 
 /** Tabs with a terminal in them. */
 export const isTermTab = (t: Tab | undefined): t is TerminalTab | LocalTab =>
@@ -207,6 +217,7 @@ interface State {
   shells: Shell[];
   multiExec: MultiExec;
   scans: Record<string, ScanState | undefined>;
+  monitor: MonitorView | null;
   /** Target to bring into view when the Discover tab opens. */
   discoverFocus: string | null;
 
@@ -277,6 +288,10 @@ interface State {
   pm2Start(target: string, app: { script: string; name: string; cwd: string; instances: number }): Promise<boolean>;
   pm2Terminal(target: string, kind: "logs" | "monit", app?: { id: number; name: string }): Promise<void>;
   openDiscoverTab(focus?: string): void;
+  loadMonitor(): Promise<void>;
+  saveMonitor(patch: Partial<MonitorSettings>): Promise<void>;
+  setMonitored(hostId: string, on: boolean): Promise<void>;
+  openMonitorTab(): void;
   setMultiExec(patch: Partial<MultiExec>): void;
   /** Turns multi-exec on (for every open terminal) or off. */
   toggleMultiExec(): void;
@@ -354,6 +369,7 @@ export const useApp = create<State>()(
       shells: [],
       multiExec: { on: false, targets: [], tiled: false },
       scans: {},
+      monitor: null,
       discoverFocus: null,
       connectionDialog: { open: false },
       sshDialog: { open: false },
@@ -387,6 +403,7 @@ export const useApp = create<State>()(
           (t) =>
             t.kind === "tunnels" ||
             t.kind === "discover" ||
+            t.kind === "monitor" ||
             t.kind === "local" ||
             ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId),
         );
@@ -741,6 +758,33 @@ export const useApp = create<State>()(
         const title = kind === "monit" ? "pm2 monit" : app ? `logs: ${app.name}` : "pm2 logs";
         if (target === "local") get().openLocalTerminal(undefined, { title, command: cmd.local });
         else get().openTerminalTab(target, { title, command: cmd.remote });
+      },
+
+      async loadMonitor() {
+        try {
+          set({ monitor: await monitorApi.state() });
+        } catch {
+          // Shown as "not loaded"; the next change event retries.
+        }
+      },
+
+      async saveMonitor(patch) {
+        const current = get().monitor?.settings ?? (await monitorApi.state()).settings;
+        await monitorApi.save({ ...current, ...patch });
+        await get().loadMonitor();
+      },
+
+      async setMonitored(hostId, on) {
+        const hosts = get().monitor?.settings.hosts ?? [];
+        await get().saveMonitor({ hosts: on ? [...new Set([...hosts, hostId])] : hosts.filter((h) => h !== hostId) });
+        if (on) void monitorApi.check(hostId);
+      },
+
+      openMonitorTab() {
+        const existing = get().tabs.find((t) => t.kind === "monitor");
+        if (existing) return set({ activeTabId: existing.id });
+        const tab: MonitorTab = { id: uid(), kind: "monitor", title: "Monitoring" };
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
       },
 
       openDiscoverTab(focus) {
