@@ -12,7 +12,7 @@
 
 use crate::error::{AppError, AppResult};
 use crate::ssh::SshConfig;
-use crate::store::{ConnectionConfig, Folder, Store, TunnelConfig};
+use crate::store::{ConnectionConfig, Folder, SavedCommand, Store, TunnelConfig};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -34,6 +34,8 @@ pub struct Counts {
     pub connections: usize,
     pub ssh_hosts: usize,
     pub tunnels: usize,
+    #[serde(default)]
+    pub commands: usize,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
@@ -62,6 +64,9 @@ pub struct Bundle {
     pub connections: Vec<ConnectionConfig>,
     pub ssh_hosts: Vec<SshConfig>,
     pub tunnels: Vec<TunnelConfig>,
+    /// Saved commands for the shared hosts (limited to those hosts).
+    #[serde(default)]
+    pub commands: Vec<SavedCommand>,
     #[serde(default)]
     pub secrets: Option<Secrets>,
 }
@@ -147,10 +152,18 @@ pub fn collect(store: &Store, folder_id: &str) -> AppResult<(Bundle, Vec<String>
     }
     let host_ids: HashSet<&str> = ssh_hosts.iter().map(|h| h.id.as_str()).collect();
     let tunnels = store.list_tunnels().into_iter().filter(|t| host_ids.contains(t.host_id.as_str())).collect();
+    let commands = store
+        .list_commands()
+        .into_iter()
+        .filter_map(|mut c| {
+            c.host_ids.retain(|h| host_ids.contains(h.as_str()));
+            (!c.host_ids.is_empty()).then_some(c)
+        })
+        .collect();
     for h in &mut ssh_hosts {
         h.key_path = h.key_path.as_deref().map(portable_path);
     }
-    Ok((Bundle { folders, connections, ssh_hosts, tunnels, secrets: None }, extra))
+    Ok((Bundle { folders, connections, ssh_hosts, tunnels, commands, secrets: None }, extra))
 }
 
 /// "C:\Users\me\.ssh\id" → "~/.ssh/id", so it means the receiver's home.
@@ -164,7 +177,13 @@ fn portable_path(path: &str) -> String {
 }
 
 pub fn counts(b: &Bundle) -> Counts {
-    Counts { folders: b.folders.len(), connections: b.connections.len(), ssh_hosts: b.ssh_hosts.len(), tunnels: b.tunnels.len() }
+    Counts {
+        folders: b.folders.len(),
+        connections: b.connections.len(),
+        ssh_hosts: b.ssh_hosts.len(),
+        tunnels: b.tunnels.len(),
+        commands: b.commands.len(),
+    }
 }
 
 /// Reads a private key file to embed; None when it isn't there or too big.
@@ -368,6 +387,10 @@ pub fn import(store: &mut Store, bundle: Bundle, parent: Option<String>, keys_di
         let tunnel = TunnelConfig { id: map(&t.id), host_id: map(&t.host_id), ..t.clone() };
         store.save_tunnel(tunnel)?;
     }
+    for c in &bundle.commands {
+        let host_ids = c.host_ids.iter().map(|h| map(h)).collect();
+        store.save_command(SavedCommand { id: map(&c.id), host_ids, ..c.clone() })?;
+    }
     Ok(ImportResult { folder_id: root, name, counts })
 }
 
@@ -452,6 +475,15 @@ mod tests {
             auto_start: false,
         })
         .unwrap();
+        s.save_command(SavedCommand {
+            id: "deploy".into(),
+            name: "Deploy".into(),
+            script: "git pull".into(),
+            host_ids: vec!["web-01".into(), "elsewhere".into()],
+            stop_on_error: true,
+            confirm: true,
+        })
+        .unwrap();
         s.set_password("api-db", Some("db-secret")).unwrap();
         s.set_ssh_secret("web-01", Some("ssh-secret")).unwrap();
         s
@@ -497,6 +529,10 @@ mod tests {
         let web01 = dest.list_ssh().into_iter().find(|h| h.name == "web-01").unwrap();
         assert_eq!(web01.folder_id.as_deref(), Some(web.id.as_str()));
         assert_eq!(dest.list_tunnels()[0].host_id, web01.id);
+        // The command came along, limited to the shared host.
+        let cmds = dest.list_commands();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].host_ids, [web01.id.clone()]);
         assert_eq!(dest.get_password(&c.id), None);
         // Importing again makes a second copy instead of overwriting.
         import(&mut dest, decode(&text, None).unwrap(), None, &std::env::temp_dir()).unwrap();

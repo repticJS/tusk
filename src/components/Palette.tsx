@@ -1,4 +1,4 @@
-import { Activity, ArrowUpCircle, BellRing, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radar, Radio } from "lucide-react";
+import { Activity, ArrowUpCircle, BellRing, Zap, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radar, Radio } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { formatDuration } from "../lib/sql";
@@ -54,6 +54,10 @@ export function CommandPalette() {
     out.push({ id: "history", icon: <Clock size={14} />, label: "Query history", run: () => state.setHistoryOpen(true) });
     out.push({ id: "tunnels", icon: <Waypoints size={14} />, label: "SSH tunnels", run: () => state.openTunnelsTab() });
     out.push({ id: "monitor", icon: <BellRing size={14} />, label: "Monitoring", run: () => state.openMonitorTab() });
+    out.push({ id: "commands", icon: <Zap size={14} />, label: "Commands", run: () => state.openCommandsTab() });
+    for (const c of state.commands) {
+      out.push({ id: `run-${c.id}`, icon: <Zap size={14} />, label: `Run: ${c.name}`, run: () => state.runCommand(c) });
+    }
     out.push({
       id: "discover",
       icon: <Radar size={14} />,
@@ -130,6 +134,7 @@ export function CommandPalette() {
     state.shells,
     state.tabs,
     state.multiExec,
+    state.commands,
   ]);
 
   const filtered = useMemo(() => {

@@ -29,6 +29,8 @@ struct AppState {
     /// Shells found on this PC, detected once.
     shells: Mutex<Option<Vec<local::Shell>>>,
     monitor: monitor::Monitor,
+    /// Running saved commands: one cancel signal per host.
+    runs: Mutex<std::collections::HashMap<String, Vec<std::sync::Arc<tokio::sync::Notify>>>>,
 }
 
 impl AppState {
@@ -230,6 +232,93 @@ fn delete_folder(state: State<'_, AppState>, id: String) -> AppResult<()> {
 #[tauri::command]
 fn move_to_folder(state: State<'_, AppState>, items: Vec<ItemRef>, folder_id: Option<String>) -> AppResult<()> {
     state.store.lock().unwrap().move_items(&items, folder_id)
+}
+
+// ---- saved commands ----
+
+#[tauri::command]
+fn list_commands(state: State<'_, AppState>) -> Vec<store::SavedCommand> {
+    state.store.lock().unwrap().list_commands()
+}
+
+#[tauri::command]
+fn save_command(state: State<'_, AppState>, command: store::SavedCommand) -> AppResult<()> {
+    state.store.lock().unwrap().save_command(command)
+}
+
+#[tauri::command]
+fn delete_command(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    state.store.lock().unwrap().delete_command(&id)
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum RunEvent {
+    #[serde(rename_all = "camelCase")]
+    Output { host_id: String, data: String },
+    #[serde(rename_all = "camelCase")]
+    Exit { host_id: String, status: Option<u32>, error: Option<AppError>, cancelled: bool },
+}
+
+/// Runs a script on several hosts at once, streaming each one's output.
+/// Resolves when every host has finished.
+#[tauri::command]
+async fn run_command(
+    state: State<'_, AppState>,
+    run_id: String,
+    host_ids: Vec<String>,
+    script: String,
+    stop_on_error: bool,
+    events: Channel<RunEvent>,
+) -> AppResult<()> {
+    // Node tools installed through nvm & co. should be found, as in a login shell.
+    let full = format!("{}\n{}{}", pm2::PATH_PRELUDE, if stop_on_error { "set -e\n" } else { "" }, script);
+    let cmd = ssh::posix(&full);
+    let mut cancels = Vec::new();
+    let mut tasks = Vec::new();
+    for host_id in host_ids {
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        cancels.push(cancel.clone());
+        let creds = state.ssh_creds(&host_id);
+        let tunnels = state.tunnels.clone();
+        let (events, cmd) = (events.clone(), cmd.clone());
+        tasks.push(async move {
+            let out = events.clone();
+            let id = host_id.clone();
+            let result = match creds {
+                Err(e) => Err(e),
+                Ok(creds) => {
+                    tunnels
+                        .exec_stream(creds, &cmd, cancel, move |bytes| {
+                            let data = String::from_utf8_lossy(bytes).into_owned();
+                            let _ = out.send(RunEvent::Output { host_id: id.clone(), data });
+                        })
+                        .await
+                }
+            };
+            let exit = match result {
+                Ok(status) => RunEvent::Exit { host_id, status, error: None, cancelled: false },
+                Err(e) => {
+                    let cancelled = e.kind.as_deref() == Some("CANCELLED");
+                    RunEvent::Exit { host_id, status: None, error: (!cancelled).then_some(e), cancelled }
+                }
+            };
+            let _ = events.send(exit);
+        });
+    }
+    state.runs.lock().unwrap().insert(run_id.clone(), cancels);
+    futures_util::future::join_all(tasks).await;
+    state.runs.lock().unwrap().remove(&run_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_run(state: State<'_, AppState>, run_id: String) {
+    if let Some(cancels) = state.runs.lock().unwrap().get(&run_id) {
+        for c in cancels {
+            c.notify_one();
+        }
+    }
 }
 
 // ---- monitoring ----
@@ -842,6 +931,7 @@ pub fn run() {
                 local: local::LocalTerms::default(),
                 shells: Mutex::new(None),
                 monitor: Default::default(),
+                runs: Default::default(),
             });
             start_monitor(app.handle().clone());
             Ok(())
@@ -868,6 +958,11 @@ pub fn run() {
             move_to_folder,
             share_info,
             monitor_state,
+            list_commands,
+            save_command,
+            delete_command,
+            run_command,
+            cancel_run,
             monitor_save,
             monitor_check,
             monitor_clear_alerts,

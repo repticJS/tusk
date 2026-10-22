@@ -88,6 +88,28 @@ struct StoreFile {
     tunnels: Vec<TunnelConfig>,
     #[serde(default)]
     monitor: MonitorSettings,
+    #[serde(default)]
+    commands: Vec<SavedCommand>,
+}
+
+/// A named shell script to run on one or more SSH hosts (deploys, restarts…).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedCommand {
+    pub id: String,
+    pub name: String,
+    pub script: String,
+    pub host_ids: Vec<String>,
+    /// Stop at the first failing line (`set -e`).
+    #[serde(default = "yes")]
+    pub stop_on_error: bool,
+    /// Ask before running.
+    #[serde(default = "yes")]
+    pub confirm: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Background checks of SSH hosts.
@@ -207,9 +229,44 @@ impl Store {
         }
         self.file.ssh_hosts.retain(|c| c.id != id);
         self.file.tunnels.retain(|t| t.host_id != id);
+        for c in &mut self.file.commands {
+            c.host_ids.retain(|h| h != id);
+        }
+        self.file.commands.retain(|c| !c.host_ids.is_empty());
         self.save()?;
         secret::delete(&self.dir, &ssh_secret_key(id));
         Ok(())
+    }
+
+    // ---- saved commands ----
+
+    pub fn list_commands(&self) -> Vec<SavedCommand> {
+        self.file.commands.clone()
+    }
+
+    pub fn save_command(&mut self, c: SavedCommand) -> AppResult<()> {
+        if c.name.trim().is_empty() {
+            return Err(AppError::msg("Give the command a name"));
+        }
+        if c.script.trim().is_empty() {
+            return Err(AppError::msg("Enter the commands to run"));
+        }
+        if c.host_ids.is_empty() {
+            return Err(AppError::msg("Pick at least one server"));
+        }
+        for h in &c.host_ids {
+            self.get_ssh(h)?;
+        }
+        match self.file.commands.iter_mut().find(|x| x.id == c.id) {
+            Some(existing) => *existing = c,
+            None => self.file.commands.push(c),
+        }
+        self.save()
+    }
+
+    pub fn delete_command(&mut self, id: &str) -> AppResult<()> {
+        self.file.commands.retain(|c| c.id != id);
+        self.save()
     }
 
     // ---- monitoring ----
@@ -520,6 +577,29 @@ mod tests {
             target_port: 80,
             auto_start: false,
         }
+    }
+
+    #[test]
+    fn commands_follow_their_hosts() {
+        let mut s = store();
+        s.upsert_ssh(host("a")).unwrap();
+        s.upsert_ssh(host("b")).unwrap();
+        let cmd = |id: &str, hosts: &[&str]| SavedCommand {
+            id: id.into(),
+            name: id.into(),
+            script: "uptime".into(),
+            host_ids: hosts.iter().map(|h| h.to_string()).collect(),
+            stop_on_error: true,
+            confirm: true,
+        };
+        assert!(s.save_command(cmd("bad", &["missing"])).is_err());
+        assert!(s.save_command(cmd("none", &[])).is_err());
+        s.save_command(cmd("both", &["a", "b"])).unwrap();
+        s.save_command(cmd("only-b", &["b"])).unwrap();
+        s.delete_ssh("b").unwrap();
+        let left = s.list_commands();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].host_ids, ["a"]);
     }
 
     #[test]

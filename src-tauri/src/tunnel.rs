@@ -299,6 +299,56 @@ impl Tunnels {
         }
     }
 
+    /// Runs a long command on a host, passing output to `on_output` as it
+    /// arrives, until it ends or `cancel` fires. Returns the exit status.
+    pub async fn exec_stream(
+        self: &Arc<Self>,
+        creds: Creds,
+        cmd: &str,
+        cancel: Arc<tokio::sync::Notify>,
+        mut on_output: impl FnMut(&[u8]) + Send,
+    ) -> AppResult<Option<u32>> {
+        let host_id = creds.config.id.clone();
+        let link = self.link_marked(creds, true).await;
+        let accept = self.accepted.lock().unwrap().remove(&host_id);
+        let result = async {
+            let handle = link.handle(accept).await?;
+            let mut ch = handle.channel_open_session().await.map_err(|e| AppError::msg(e.to_string()))?;
+            // A terminal makes closing the channel hang up the command (and
+            // stops tools from buffering); "dumb" keeps colours and progress
+            // bars out of the output.
+            ch.request_pty(false, "dumb", 160, 50, 0, 0, &[]).await.map_err(|e| AppError::msg(e.to_string()))?;
+            ch.exec(true, cmd).await.map_err(|e| AppError::msg(e.to_string()))?;
+            let mut status = None;
+            loop {
+                tokio::select! {
+                    msg = ch.wait() => match msg {
+                        Some(russh::ChannelMsg::Data { data }) => on_output(&data),
+                        Some(russh::ChannelMsg::ExtendedData { data, .. }) => on_output(&data),
+                        Some(russh::ChannelMsg::ExitStatus { exit_status }) => status = Some(exit_status),
+                        Some(russh::ChannelMsg::Close) | None => break,
+                        Some(_) => {}
+                    },
+                    _ = cancel.notified() => {
+                        // Closing the channel hangs up the command on the server.
+                        let _ = ch.close().await;
+                        return Err(AppError::kind("CANCELLED", "Cancelled"));
+                    }
+                }
+            }
+            Ok(status)
+        }
+        .await;
+        link.last_used.store(now_ms(), Ordering::SeqCst);
+        link.busy.fetch_sub(1, Ordering::SeqCst);
+        let this = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(LINGER).await;
+            this.release_link(&host_id).await;
+        });
+        result
+    }
+
     /// Runs a command on a host over its shared link (connecting if needed),
     /// for scans and quick actions that don't belong to a terminal.
     pub async fn exec(self: &Arc<Self>, creds: Creds, cmd: &str, timeout: Duration) -> AppResult<(String, Option<u32>)> {

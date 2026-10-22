@@ -7,6 +7,7 @@ import {
   sshApi,
   tunnelApi,
   withSshPrompts,
+  commandsApi,
   discoverApi,
   monitorApi,
   pm2Api,
@@ -19,6 +20,7 @@ import {
   type MonitorSettings,
   type MonitorView,
   type Pm2Action,
+  type SavedCommand,
   type ScanResult,
   type SessionRef,
   type Shell,
@@ -77,6 +79,43 @@ export interface LocalTab {
   command?: string[];
 }
 
+/** Saved commands (deploy scripts and the like). */
+export interface CommandsTab {
+  id: string;
+  kind: "commands";
+  title: string;
+}
+
+/** Output of one run of a command on its hosts. */
+export interface RunTab {
+  id: string;
+  kind: "run";
+  title: string;
+  runId: string;
+}
+
+export interface RunHost {
+  hostId: string;
+  name: string;
+  output: string;
+  status: "running" | "ok" | "failed" | "cancelled";
+  exit?: number | null;
+  error?: string;
+  /** The error was a login problem the user can fix and retry. */
+  loginProblem?: AppErrorInfo;
+  started: number;
+  ended?: number;
+}
+
+export interface RunState {
+  title: string;
+  script: string;
+  stopOnError: boolean;
+  hosts: RunHost[];
+  /** The backend run in progress, for cancelling. */
+  backendId?: string;
+}
+
 /** Background monitoring: hosts, problems, alert history. */
 export interface MonitorTab {
   id: string;
@@ -123,7 +162,7 @@ export interface TunnelsTab {
 
 /** Tabs bound to a database connection. */
 export type DbTab = QueryTab | TableTab | ActivityTab;
-export type Tab = DbTab | TerminalTab | LocalTab | RemoteFileTab | TunnelsTab | DiscoverTab | MonitorTab;
+export type Tab = DbTab | TerminalTab | LocalTab | RemoteFileTab | TunnelsTab | DiscoverTab | MonitorTab | CommandsTab | RunTab;
 
 /** Tabs with a terminal in them. */
 export const isTermTab = (t: Tab | undefined): t is TerminalTab | LocalTab =>
@@ -218,6 +257,12 @@ interface State {
   multiExec: MultiExec;
   scans: Record<string, ScanState | undefined>;
   monitor: MonitorView | null;
+  commands: SavedCommand[];
+  runs: Record<string, RunState | undefined>;
+  /** Command dialog: open with these starting values. */
+  commandDialog: { editing: Partial<SavedCommand> } | null;
+  /** A command waiting for "Run" in the confirmation dialog. */
+  pendingRun: SavedCommand | null;
   /** Target to bring into view when the Discover tab opens. */
   discoverFocus: string | null;
 
@@ -292,6 +337,17 @@ interface State {
   saveMonitor(patch: Partial<MonitorSettings>): Promise<void>;
   setMonitored(hostId: string, on: boolean): Promise<void>;
   openMonitorTab(): void;
+  loadCommands(): Promise<void>;
+  saveCommand(c: SavedCommand): Promise<boolean>;
+  deleteCommand(id: string): Promise<void>;
+  openCommandDialog(editing?: Partial<SavedCommand>): void;
+  closeCommandDialog(): void;
+  openCommandsTab(): void;
+  /** Runs a command, asking first when it says so (unless `confirmed`). */
+  runCommand(c: SavedCommand, confirmed?: boolean): void;
+  /** Runs again on some hosts of an earlier run (all when omitted). */
+  rerun(runId: string, hostIds?: string[]): void;
+  cancelRun(runId: string): void;
   setMultiExec(patch: Partial<MultiExec>): void;
   /** Turns multi-exec on (for every open terminal) or off. */
   toggleMultiExec(): void;
@@ -370,6 +426,10 @@ export const useApp = create<State>()(
       multiExec: { on: false, targets: [], tiled: false },
       scans: {},
       monitor: null,
+      commands: [],
+      runs: {},
+      commandDialog: null,
+      pendingRun: null,
       discoverFocus: null,
       connectionDialog: { open: false },
       sshDialog: { open: false },
@@ -391,11 +451,12 @@ export const useApp = create<State>()(
       setRowLimit: (rowLimit) => set({ rowLimit }),
 
       async loadConnections() {
-        const [connections, sshHosts, folders, tunnels] = await Promise.all([
+        const [connections, sshHosts, folders, tunnels, commands] = await Promise.all([
           api.listConnections(),
           sshApi.list(),
           folderApi.list(),
           tunnelApi.list(),
+          commandsApi.list(),
         ]);
         // Drop tabs whose connection or host no longer exists.
         const ids = new Set([...connections.map((c) => c.id), ...sshHosts.map((h) => h.id)]);
@@ -404,13 +465,15 @@ export const useApp = create<State>()(
             t.kind === "tunnels" ||
             t.kind === "discover" ||
             t.kind === "monitor" ||
+            t.kind === "commands" ||
+            t.kind === "run" ||
             t.kind === "local" ||
             ids.has(t.kind === "terminal" || t.kind === "remote" ? t.hostId : t.connId),
         );
         const activeTabId = tabs.some((t) => t.id === get().activeTabId)
           ? get().activeTabId
           : (tabs[0]?.id ?? null);
-        set({ connections, sshHosts, folders, tunnels, tabs, activeTabId });
+        set({ connections, sshHosts, folders, tunnels, commands, tabs, activeTabId });
       },
 
       openConnectionDialog: (editing, password) => set({ connectionDialog: { open: true, editing, password } }),
@@ -778,6 +841,93 @@ export const useApp = create<State>()(
         const hosts = get().monitor?.settings.hosts ?? [];
         await get().saveMonitor({ hosts: on ? [...new Set([...hosts, hostId])] : hosts.filter((h) => h !== hostId) });
         if (on) void monitorApi.check(hostId);
+      },
+
+      async loadCommands() {
+        set({ commands: await commandsApi.list() });
+      },
+
+      async saveCommand(c) {
+        try {
+          await commandsApi.save(c);
+          await get().loadCommands();
+          return true;
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+          return false;
+        }
+      },
+
+      async deleteCommand(id) {
+        await commandsApi.remove(id);
+        await get().loadCommands();
+      },
+
+      openCommandDialog: (editing = {}) => set({ commandDialog: { editing } }),
+      closeCommandDialog: () => set({ commandDialog: null }),
+
+      openCommandsTab() {
+        const existing = get().tabs.find((t) => t.kind === "commands");
+        if (existing) return set({ activeTabId: existing.id });
+        const tab: CommandsTab = { id: uid(), kind: "commands", title: "Commands" };
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
+      },
+
+      runCommand(c, confirmed) {
+        if (c.confirm && !confirmed) return set({ pendingRun: c });
+        set({ pendingRun: null });
+        const runId = uid();
+        const names = new Map(get().sshHosts.map((h) => [h.id, h.name]));
+        const run: RunState = {
+          title: c.name,
+          script: c.script,
+          stopOnError: c.stopOnError,
+          hosts: c.hostIds.map((hostId) => ({ hostId, name: names.get(hostId) ?? "?", output: "", status: "running", started: Date.now() })),
+        };
+        const tab: RunTab = { id: uid(), kind: "run", title: `Run: ${c.name}`, runId };
+        set((s) => ({ runs: { ...s.runs, [runId]: run }, tabs: [...s.tabs, tab], activeTabId: tab.id }));
+        get().rerun(runId);
+      },
+
+      rerun(runId, hostIds) {
+        const run = get().runs[runId];
+        if (!run) return;
+        const targets = hostIds ?? run.hosts.map((h) => h.hostId);
+        const patchHost = (hostId: string, f: (h: RunHost) => RunHost) =>
+          set((s) => {
+            const r = s.runs[runId];
+            if (!r) return {};
+            return { runs: { ...s.runs, [runId]: { ...r, hosts: r.hosts.map((h) => (h.hostId === hostId ? f(h) : h)) } } };
+          });
+        for (const id of targets) {
+          patchHost(id, (h) => ({ ...h, output: "", status: "running", exit: undefined, error: undefined, loginProblem: undefined, started: Date.now(), ended: undefined }));
+        }
+        // Each run of the backend gets its own id so it can be cancelled on its own.
+        const backendId = `${runId}:${uid()}`;
+        set((s) => ({ runs: { ...s.runs, [runId]: { ...s.runs[runId]!, backendId } } }));
+        void commandsApi
+          .run(backendId, targets, run.script, run.stopOnError, (e) => {
+            if (e.type === "output") {
+              // Keep the last 300 KB per host.
+              patchHost(e.hostId, (h) => ({ ...h, output: (h.output + e.data).slice(-300_000) }));
+            } else {
+              const login = e.error?.sshHost && e.error.kind?.startsWith("SSH_") ? e.error : undefined;
+              patchHost(e.hostId, (h) => ({
+                ...h,
+                ended: Date.now(),
+                exit: e.status,
+                status: e.cancelled ? "cancelled" : !e.error && e.status === 0 ? "ok" : "failed",
+                error: e.error?.message,
+                loginProblem: login ?? undefined,
+              }));
+            }
+          })
+          .catch((err) => get().showToast(err instanceof Error ? err.message : String(err), "error"));
+      },
+
+      cancelRun(runId) {
+        const id = get().runs[runId]?.backendId;
+        if (id) void commandsApi.cancel(id);
       },
 
       openMonitorTab() {

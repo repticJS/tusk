@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0
+
+- Saved commands: save deploys, restarts and other scripts and run them on one or many servers at once, with live output from each, exit codes, cancel, and "run again where it failed".
+- Run them from the Commands tab, a host's right-click menu, the ⚡ menu in a terminal header, or the command palette.
+- Shared folders now include the commands for their servers.
+
 ## 0.9.0
 
 - Monitoring: pick SSH hosts to watch (right-click → Monitor this host). Tusk checks them every few minutes and sends a Windows notification for full disks, low memory, failed services, crashed PM2 apps and containers, certificates about to expire, and servers that stop answering, and again when each is fixed.

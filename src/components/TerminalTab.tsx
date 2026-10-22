@@ -7,7 +7,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { Activity, ChevronDown, ChevronUp, FolderTree, Radar, Radio, RotateCw, Search, X } from "lucide-react";
+import { Activity, ChevronDown, ChevronUp, FolderTree, Plus, Radar, Radio, RotateCw, Search, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { useShallow } from "zustand/react/shallow";
@@ -16,7 +16,7 @@ import { broadcast, registerTerminal } from "../lib/multiexec";
 import { useApp, type LocalTab, type TerminalTab as TerminalTabT } from "../store";
 import { StatsBar } from "./ServerStats";
 import { SftpPanel } from "./SftpPanel";
-import { Spinner } from "./ui";
+import { DropdownButton, Spinner } from "./ui";
 
 type ConnState = "connecting" | "connected" | "closed";
 
@@ -104,6 +104,8 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
   const [followSignal, setFollowSignal] = useState(0);
   const exitStatus = useRef<number | null>(null);
   const statsOn = useApp((s) => s.statsBar) && !isLocal;
+  const allCommands = useApp((s) => s.commands);
+  const hostCommands = tab.kind === "terminal" ? allCommands.filter((c) => c.hostIds.includes(tab.hostId)) : [];
   // Files (SFTP) are for SSH terminals, and hidden in the tiled view.
   const filesOpen = useApp((s) => s.filePanel.open) && !isLocal && !tiled;
   const setFilePanel = useApp((s) => s.setFilePanel);
@@ -435,6 +437,26 @@ export function TerminalTab({ tab, active, tiled = false }: { tab: TerminalTabT 
         >
           <Radio size={13} />
         </button>
+        {tab.kind === "terminal" && (
+          <DropdownButton
+            className="btn-ghost h-6 px-1.5"
+            title="Commands for this server"
+            label={<Zap size={13} />}
+            items={[
+              ...hostCommands.map((c) => ({
+                label: c.name,
+                icon: <Zap size={13} />,
+                onClick: () => useApp.getState().runCommand(c),
+              })),
+              ...(hostCommands.length ? ["separator" as const] : []),
+              {
+                label: "New command…",
+                icon: <Plus size={13} />,
+                onClick: () => useApp.getState().openCommandDialog({ hostIds: [tab.hostId] }),
+              },
+            ]}
+          />
+        )}
         {!isLocal && (
           <button
             className={`btn-ghost h-6 px-1.5 ${statsOn ? "text-accent" : ""}`}

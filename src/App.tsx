@@ -17,6 +17,7 @@ import {
   TerminalSquare,
   Waypoints,
   X,
+  Zap,
 } from "lucide-react";
 import { useEffect } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
@@ -33,6 +34,7 @@ import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
 import { DiscoverTab } from "./components/DiscoverTab";
 import { ActivityTab } from "./components/ActivityTab";
 import { MonitorBell, MonitorTab } from "./components/MonitorTab";
+import { CommandDialog, CommandsTab, RunConfirm, RunTab } from "./components/Commands";
 import { ImportDialog, ShareDialog } from "./components/ShareDialogs";
 import { UpdateChip, UpdateDialog, useUpdateChecks } from "./components/Updater";
 import { Modal, useMenu } from "./components/ui";
@@ -180,6 +182,10 @@ export default function App() {
                     <DiscoverTab tab={t} active={t.id === activeTabId} />
                   ) : t.kind === "monitor" ? (
                     <MonitorTab tab={t} active={t.id === activeTabId} />
+                  ) : t.kind === "commands" ? (
+                    <CommandsTab tab={t} active={t.id === activeTabId} />
+                  ) : t.kind === "run" ? (
+                    <RunTab tab={t} active={t.id === activeTabId} />
                   ) : (
                     <RemoteFileTab tab={t} active={t.id === activeTabId} />
                   )}
@@ -196,6 +202,8 @@ export default function App() {
       {sshDialog.open && <SshDialog key={sshDialog.editing?.id ?? "new"} />}
       {tunnelDialog.open && <TunnelDialog key={tunnelDialog.editing?.id || "new"} />}
       <ShareDialog />
+      <CommandDialog />
+      <RunConfirm />
       <ImportDialog />
       <PasswordPrompt />
       <SshSecretPrompt />
@@ -228,7 +236,12 @@ function TabBar() {
       <div className="flex min-w-0 flex-1 items-end overflow-x-auto [scrollbar-width:none]">
         {tabs.map((t) => {
           const conn =
-            t.kind === "tunnels" || t.kind === "local" || t.kind === "discover" || t.kind === "monitor"
+            t.kind === "tunnels" ||
+            t.kind === "local" ||
+            t.kind === "discover" ||
+            t.kind === "monitor" ||
+            t.kind === "commands" ||
+            t.kind === "run"
               ? undefined
               : t.kind === "terminal" || t.kind === "remote"
                 ? sshHosts.find((h) => h.id === t.hostId)
@@ -261,6 +274,8 @@ function TabBar() {
                     ? "Databases and containers"
                     : t.kind === "monitor"
                       ? "Monitoring"
+                      : t.kind === "commands" || t.kind === "run"
+                        ? t.title
                   : t.kind === "local"
                     ? `Local terminal: ${t.title}`
                   : t.kind === "terminal"
@@ -292,6 +307,8 @@ function TabBar() {
                   <Radar size={13} />
                 ) : t.kind === "monitor" ? (
                   <BellRing size={13} />
+                ) : t.kind === "commands" || t.kind === "run" ? (
+                  <Zap size={13} />
                 ) : (
                   <FileCode2 size={13} />
                 )}

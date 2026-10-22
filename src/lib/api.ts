@@ -42,6 +42,7 @@ export interface ShareCounts {
   connections: number;
   sshHosts: number;
   tunnels: number;
+  commands?: number;
 }
 
 export interface ShareInfo {
@@ -310,6 +311,36 @@ export interface ServerProcess {
 export const statsApi = {
   snapshot: (termId: string) => call<ServerStats>("ssh_stats", { termId }),
   processes: (termId: string) => call<{ cpuTotal: number; list: ServerProcess[] }>("ssh_processes", { termId }),
+};
+
+// ---- saved commands ----
+
+export interface SavedCommand {
+  id: string;
+  name: string;
+  script: string;
+  hostIds: string[];
+  /** Stop at the first failing line (set -e). */
+  stopOnError: boolean;
+  /** Ask before running. */
+  confirm: boolean;
+}
+
+export type RunEvent =
+  | { type: "output"; hostId: string; data: string }
+  | { type: "exit"; hostId: string; status?: number | null; error?: AppErrorInfo | null; cancelled: boolean };
+
+export const commandsApi = {
+  list: () => call<SavedCommand[]>("list_commands"),
+  save: (command: SavedCommand) => call<void>("save_command", { command }),
+  remove: (id: string) => call<void>("delete_command", { id }),
+  /** Resolves when every host has finished; output and exits arrive on `onEvent`. */
+  run(runId: string, hostIds: string[], script: string, stopOnError: boolean, onEvent: (e: RunEvent) => void) {
+    const events = new Channel<RunEvent>();
+    events.onmessage = onEvent;
+    return call<void>("run_command", { runId, hostIds, script, stopOnError, events });
+  },
+  cancel: (runId: string) => call<void>("cancel_run", { runId }),
 };
 
 // ---- monitoring ----

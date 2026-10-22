@@ -21,6 +21,7 @@ import {
   Table2,
   TerminalSquare,
   Monitor,
+  Zap,
   AlertTriangle,
   BellOff,
   BellRing,
@@ -147,6 +148,7 @@ export function Sidebar() {
             { label: "New SSH host", icon: <TerminalSquare size={13} />, onClick: () => openSshDialog() },
             "separator",
             { label: "New folder", icon: <FolderPlus size={13} />, onClick: () => void createFolder(null) },
+            { label: "New command…", icon: <Zap size={13} />, onClick: () => useApp.getState().openCommandDialog() },
             {
               label: "Import shared folder…",
               icon: <Download size={13} />,
@@ -312,6 +314,26 @@ function FolderNode({ folder, depth, tree }: { folder: Folder; depth: number; tr
             },
             "separator",
             { label: "Share folder…", icon: <Share2 size={13} />, onClick: () => useApp.getState().openShareDialog(folder.id) },
+            {
+              label: "New command for this folder…",
+              icon: <Zap size={13} />,
+              onClick: () => {
+                const s = useApp.getState();
+                // Every SSH host in the folder and its subfolders.
+                const ids = new Set([folder.id]);
+                let grew = true;
+                while (grew) {
+                  grew = false;
+                  for (const f of s.folders) {
+                    if (f.parentId && ids.has(f.parentId) && !ids.has(f.id)) {
+                      ids.add(f.id);
+                      grew = true;
+                    }
+                  }
+                }
+                s.openCommandDialog({ hostIds: s.sshHosts.filter((h) => h.folderId && ids.has(h.folderId)).map((h) => h.id) });
+              },
+            },
             {
               label: "Import into this folder…",
               icon: <Download size={13} />,
@@ -484,6 +506,8 @@ function SshNode({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const target = `${host.user}@${host.host}${host.port === 22 ? "" : `:${host.port}`}`;
   const monitored = useApp((s) => !!s.monitor?.settings.hosts.includes(host.id));
+  const allCommands = useApp((s) => s.commands);
+  const hostCommands = allCommands.filter((c) => c.hostIds.includes(host.id));
   // Worst problem the monitor found: shown on the row.
   const health = useApp((s) => {
     const p = s.monitor?.hosts.find((h) => h.hostId === host.id)?.problems ?? [];
@@ -528,6 +552,17 @@ function SshNode({
             monitored
               ? { label: "Stop monitoring", icon: <BellOff size={13} />, onClick: () => void useApp.getState().setMonitored(host.id, false) }
               : { label: "Monitor this host", icon: <BellRing size={13} />, onClick: () => void useApp.getState().setMonitored(host.id, true) },
+            ...hostCommands.slice(0, 6).map((c) => ({
+              label: `Run: ${c.name}`,
+              icon: <Zap size={13} />,
+              onClick: () => useApp.getState().runCommand(c),
+            })),
+            {
+              label: "New command…",
+              icon: <Zap size={13} />,
+              onClick: () => useApp.getState().openCommandDialog({ hostIds: [host.id] }),
+            },
+            "separator",
             {
               label: "Scan for databases & containers",
               icon: <Radar size={13} />,
