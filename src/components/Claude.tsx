@@ -1,10 +1,29 @@
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { Bot, Check, Copy, Database, FolderClosed, Server, ShieldAlert, TerminalSquare, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
-import { claudeApi, type ClaudeAccess, type ClaudeLevel, type Folder } from "../lib/api";
+import {
+  Bot,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Database,
+  FolderClosed,
+  FolderOpen,
+  Server,
+  Settings,
+  ShieldAlert,
+  SquareTerminal,
+  TerminalSquare,
+  Trash2,
+  X,
+} from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
+import { claudeApi, type ClaudeAccess, type ClaudeActivity, type ClaudeLevel, type Folder } from "../lib/api";
 import { fmtDuration } from "../lib/format";
 import { useApp, type ClaudeTab as ClaudeTabModel } from "../store";
 import { Modal, Spinner } from "./ui";
+
+const NONE: never[] = [];
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -78,6 +97,259 @@ function AccessEditor(props: { id: string; name: string; folderId: string | null
 function ago(at: number) {
   const d = Date.now() / 1000 - at;
   return d < 45 ? "just now" : `${fmtDuration(d)} ago`;
+}
+
+/** What each tool does, while running and once done. */
+const TOOL_WORDS: Record<string, [string, string]> = {
+  list_connections: ["Looking at what it may use", "Looked at what it may use"],
+  db_tables: ["Listing tables", "Listed tables"],
+  db_describe: ["Looking at a table", "Looked at a table"],
+  db_query: ["Running a query", "Ran a query"],
+  db_execute: ["Changing data", "Changed data"],
+  db_activity: ["Checking database activity", "Checked database activity"],
+  server_status: ["Checking the server", "Checked the server"],
+  server_logs: ["Reading logs", "Read logs"],
+  server_run: ["Running a command", "Ran a command"],
+  files_list: ["Listing files", "Listed files"],
+  files_read: ["Reading a file", "Read a file"],
+  files_write: ["Writing a file", "Wrote a file"],
+  run_saved_command: ["Running a saved command", "Ran a saved command"],
+};
+
+const busy = (a: ClaudeActivity) => a.outcome === "running" || a.outcome === "waiting";
+
+function toolWords(a: ClaudeActivity) {
+  const w = TOOL_WORDS[a.tool];
+  if (!w) return a.tool;
+  return busy(a) ? `${w[0]}…` : w[1];
+}
+
+function took(ms: number) {
+  return ms < 1000 ? `${ms} ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)} s` : fmtDuration(ms / 1000);
+}
+
+/** Re-renders every second while `on`. */
+function useTicker(on: boolean) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!on) return;
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [on]);
+}
+
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      className="btn-ghost h-5 px-1 text-[11px]"
+      title={label}
+      aria-label={label}
+      onClick={(e) => {
+        e.stopPropagation();
+        void writeText(text).then(() => {
+          setDone(true);
+          setTimeout(() => setDone(false), 1200);
+        });
+      }}
+    >
+      {done ? <Check size={11} /> : <Copy size={11} />}
+    </button>
+  );
+}
+
+function Block(props: { title: string; text: string; live?: boolean; tall?: boolean; tone?: string }) {
+  const ref = useRef<HTMLPreElement>(null);
+  // Live output follows the end, like a terminal.
+  useLayoutEffect(() => {
+    if (props.live && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [props.live, props.text]);
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-center gap-1 text-[10.5px] font-semibold tracking-wide text-faint uppercase">
+        {props.title}
+        {props.live && <Spinner size={9} />}
+        <div className="flex-1" />
+        <CopyButton text={props.text} label={`Copy ${props.title.toLowerCase()}`} />
+      </div>
+      <pre
+        ref={ref}
+        className={`selectable overflow-auto rounded border border-border bg-bg px-2 py-1.5 font-mono text-[11px] leading-snug whitespace-pre-wrap break-words ${
+          props.tall ? "max-h-72" : "max-h-40"
+        } ${props.tone ?? ""}`}
+        data-block={props.title}
+      >
+        {props.text}
+      </pre>
+    </div>
+  );
+}
+
+/** Jump from something Claude did to the same place in Tusk. */
+function OpenInTusk({ a }: { a: ClaudeActivity }) {
+  const exists = useApp((s) =>
+    a.targetKind === "database"
+      ? s.connections.some((c) => c.id === a.targetId)
+      : a.targetKind === "server"
+        ? s.sshHosts.some((h) => h.id === a.targetId)
+        : a.targetKind === "ftp"
+          ? s.ftpSites.some((f) => f.id === a.targetId)
+          : false,
+  );
+  if (!exists) return null;
+  const st = useApp.getState();
+  const buttons: { label: string; icon: React.ReactNode; run: () => void }[] = [];
+  if (a.targetKind === "database") {
+    const conn = st.connections.find((c) => c.id === a.targetId);
+    const sql = a.tool === "db_query" || a.tool === "db_execute" ? a.input : "";
+    buttons.push({
+      label: sql ? "Open in query editor" : "Open a query",
+      icon: <Database size={11} />,
+      run: () => void st.openQueryTab(a.targetId, a.database || conn?.database || "postgres", sql || undefined),
+    });
+  }
+  if (a.targetKind === "server") {
+    buttons.push({ label: "Open terminal", icon: <SquareTerminal size={11} />, run: () => st.openTerminalTab(a.targetId) });
+  }
+  if (a.targetKind === "ftp" || (a.targetKind === "server" && a.tool.startsWith("files_"))) {
+    buttons.push({
+      label: "Browse files",
+      icon: <FolderOpen size={11} />,
+      run: () => st.openFilesTab({ kind: a.targetKind === "ftp" ? "ftp" : "ssh", id: a.targetId }),
+    });
+  }
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {buttons.map((b) => (
+        <button key={b.label} className="btn h-6 px-2 text-[11.5px]" onClick={b.run}>
+          {b.icon} {b.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** One thing Claude did, with what it asked for and what it got back. */
+function ActivityRow({ a, autoOpen = false }: { a: ClaudeActivity; autoOpen?: boolean }) {
+  // Follows `autoOpen` (the newest in the panel) until the user opens or closes it.
+  const [chosen, setOpen] = useState<boolean | null>(null);
+  const open = chosen ?? autoOpen;
+  const running = busy(a);
+  useTicker(running);
+  const elapsed = Math.max(0, Date.now() / 1000 - a.at);
+  const state =
+    a.outcome === "waiting"
+      ? { text: "needs OK", cls: "text-warn" }
+      : a.outcome === "running"
+        ? { text: "running", cls: "text-accent" }
+        : a.outcome === "ok"
+          ? { text: "done", cls: "text-ok" }
+          : a.outcome === "denied"
+            ? { text: "declined", cls: "text-warn" }
+            : { text: "failed", cls: "text-danger" };
+  return (
+    <div className="border-b border-border last:border-0" data-activity={a.tool} data-outcome={a.outcome}>
+      <button
+        className="flex w-full items-start gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-hover"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+      >
+        <span className="mt-0.5 shrink-0 text-faint">{open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
+        <span className={`mt-0.5 flex w-16 shrink-0 items-center gap-1 text-[11px] font-medium ${state.cls}`}>
+          {running && <Spinner size={9} />}
+          <span>{state.text}</span>
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate">
+            <span title={a.tool}>{toolWords(a)}</span>
+            {a.target && <span className="text-muted"> · {a.target}</span>}
+          </div>
+          {a.detail && <div className="truncate font-mono text-[11px] text-faint">{a.detail}</div>}
+          {!open && (a.outcome === "error" || a.outcome === "denied") && <div className="truncate text-[11px] text-muted">{a.summary}</div>}
+        </div>
+        <span className="shrink-0 text-right text-[11px] text-faint">
+          {a.client} · {running ? took(elapsed * 1000) : ago(a.at)}
+          {!running && a.ms > 0 && <div>took {took(a.ms)}</div>}
+        </span>
+      </button>
+      {open && (
+        <div className="flex flex-col gap-2 px-3 pt-0.5 pb-2.5 pl-[30px]" data-activity-detail>
+          {a.input && <Block title={a.tool === "files_write" ? "Path and content" : "Claude asked for"} text={a.input} />}
+          {a.outcome === "waiting" && (
+            <div className="flex items-center gap-1.5 text-[12px] text-warn">
+              <ShieldAlert size={12} /> Waiting for your OK in Tusk.
+            </div>
+          )}
+          {running && a.output && <Block title="Output so far" text={a.output} live tall />}
+          {a.outcome === "running" && !a.output && <div className="text-[12px] text-faint">Working on it…</div>}
+          {!running && a.result && (
+            <Block title="What Claude got back" text={a.result} tall tone={a.outcome === "error" ? "text-danger" : ""} />
+          )}
+          <OpenInTusk a={a} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A side panel to watch Claude work while using the rest of Tusk. */
+export function ClaudeLivePanel() {
+  const open = useApp((s) => s.claudeLive);
+  const c = useApp(
+    useShallow((s) => ({
+      enabled: !!s.claude?.enabled,
+      clients: s.claude?.clients.join(", ") ?? "",
+      activity: s.claude?.activity,
+      follow: s.claudeFollow,
+    })),
+  );
+  if (!open) return null;
+  const st = useApp.getState();
+  const items = c.activity ?? NONE;
+  const working = items.filter(busy).length;
+  return (
+    <aside className="flex w-[400px] min-w-[300px] shrink-0 flex-col border-l border-border bg-panel" aria-label="What Claude is doing" data-claude-live>
+      <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+        <Bot size={14} className={c.clients ? "text-ok" : "text-muted"} />
+        <div className="min-w-0 flex-1">
+          <div className="text-[12.5px] font-medium">What Claude is doing</div>
+          <div className="truncate text-[11px] text-muted">
+            {!c.enabled
+              ? "Claude access is off"
+              : c.clients
+                ? working
+                  ? `${c.clients} · working on ${working === 1 ? "one thing" : `${working} things`}`
+                  : `${c.clients} connected`
+                : "Waiting for Claude to connect"}
+          </div>
+        </div>
+        <button className="btn-ghost h-6 w-6 justify-center p-0" title="Claude settings" aria-label="Claude settings" onClick={() => st.openClaudeTab()}>
+          <Settings size={13} />
+        </button>
+        <button className="btn-ghost h-6 w-6 justify-center p-0" title="Close" aria-label="Close Claude panel" onClick={() => st.setClaudeLive(false)}>
+          <X size={13} />
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        {!c.enabled ? (
+          <div className="flex flex-col items-start gap-2 p-4 text-[12.5px] text-muted">
+            Claude can't use Tusk right now.
+            <button className="btn h-7 px-2.5 text-[12px]" onClick={() => st.openClaudeTab()}>
+              Set up Claude access
+            </button>
+          </div>
+        ) : items.length === 0 ? (
+          <div className="p-4 text-[12.5px] text-faint">Nothing yet. Each thing Claude does in Tusk shows up here as it happens.</div>
+        ) : (
+          items.slice(0, 100).map((a, i) => <ActivityRow key={a.id} a={a} autoOpen={i === 0} />)
+        )}
+      </div>
+      <label className="flex items-center gap-1.5 border-t border-border px-3 py-1.5 text-[11.5px] text-muted">
+        <input type="checkbox" checked={c.follow} onChange={(e) => st.setClaudeFollow(e.target.checked)} />
+        Open this panel when Claude starts something
+      </label>
+    </aside>
+  );
 }
 
 export function ClaudeTab({ active }: { tab: ClaudeTabModel; active: boolean }) {
@@ -291,26 +563,7 @@ export function ClaudeTab({ active }: { tab: ClaudeTabModel; active: boolean }) 
           <div className="overflow-hidden rounded-lg border border-border bg-panel" data-claude-activity>
             {claude.activity.length === 0 && <div className="px-4 py-3 text-[12.5px] text-faint">Nothing yet.</div>}
             {claude.activity.slice(0, 200).map((a) => (
-              <div key={a.id} className="flex items-start gap-3 border-b border-border px-4 py-1.5 text-[12px] last:border-0" data-activity={a.tool}>
-                <span
-                  className={`mt-0.5 w-14 shrink-0 text-[11px] font-medium ${
-                    a.outcome === "ok" ? "text-ok" : a.outcome === "denied" ? "text-warn" : "text-danger"
-                  }`}
-                >
-                  {a.outcome === "ok" ? "done" : a.outcome === "denied" ? "declined" : "failed"}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate">
-                    <span className="font-mono">{a.tool}</span>
-                    {a.target && <span className="text-muted"> · {a.target}</span>}
-                  </div>
-                  {a.detail && <div className="truncate font-mono text-[11px] text-faint">{a.detail}</div>}
-                  {a.outcome !== "ok" && <div className="truncate text-[11px] text-muted">{a.summary}</div>}
-                </div>
-                <span className="shrink-0 text-[11px] text-faint">
-                  {a.client} · {ago(a.at)}
-                </span>
-              </div>
+              <ActivityRow key={a.id} a={a} />
             ))}
           </div>
         </div>
@@ -320,7 +573,6 @@ export function ClaudeTab({ active }: { tab: ClaudeTabModel; active: boolean }) 
 }
 
 /** Claude asking to change something: shown over everything. */
-const NONE: never[] = [];
 
 export function ClaudeApprovalDialog() {
   const pending = useApp((s) => s.claude?.pending ?? NONE);

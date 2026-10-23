@@ -146,7 +146,9 @@ Let Claude, the desktop app or Claude Code, use your databases and servers throu
 | Check a server (disks, memory, failed services, PM2 apps, containers), read logs, list and read files | Read only |
 | Change data or schema, run shell commands, write files, run saved commands | Read & write. Tusk asks you first (Deny / Allow once / Allow for this session) unless you untick **Ask before changes** |
 
-Claude refers to connections by name; passwords and keys stay in Tusk. Everything Claude does is listed in the Claude tab, and the status bar shows when Claude is connected or waiting for you.
+Claude refers to connections by name; passwords and keys stay in Tusk.
+
+**Watch Claude work:** a side panel opens when Claude starts something (or click **Claude** in the status bar). Each step shows up as it happens: what Claude asked for (the SQL, command or file), command output as it runs, what Claude got back and how long it took. **Open in query editor**, **Open terminal** and **Browse files** take you to the same place in Tusk. The same list is in the Claude tab.
 
 ### Shortcuts
 

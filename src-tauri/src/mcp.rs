@@ -28,6 +28,10 @@ use tokio::sync::{mpsc, oneshot};
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 /// Longest tool result handed to Claude.
 const MAX_OUTPUT: usize = 60_000;
+/// Most of a request or result kept for the activity list.
+const MAX_SHOWN: usize = 20_000;
+const MAX_LIVE_OUTPUT: usize = 200_000;
+const MAX_ACTIVITY: usize = 200;
 /// How long an approval waits for the user.
 const APPROVAL_WAIT: Duration = Duration::from_secs(600);
 
@@ -186,10 +190,30 @@ pub struct Activity {
     pub client: String,
     pub tool: String,
     pub target: String,
+    /// database | server | ftp, when the target is known.
+    pub target_kind: String,
+    pub target_id: String,
+    pub database: String,
     pub detail: String,
-    /// ok | error | denied
+    /// running | waiting | ok | error | denied
     pub outcome: String,
     pub summary: String,
+    /// The whole request: SQL, command, path and so on.
+    pub input: String,
+    /// What Claude got back.
+    pub result: String,
+    /// Output of a command while it runs.
+    pub output: String,
+    /// How long it took, once done.
+    pub ms: u64,
+}
+
+#[derive(Serialize, Clone)]
+struct OutputChunk {
+    id: u64,
+    text: String,
+    /// Output length after this chunk, so a stale view can tell it missed some.
+    len: usize,
 }
 
 #[derive(Default)]
@@ -226,7 +250,7 @@ impl Mcp {
     }
 
     pub fn clear_activity(&self) {
-        self.activity.lock().unwrap().clear();
+        self.activity.lock().unwrap().retain(|e| e.outcome == "running" || e.outcome == "waiting");
     }
 
     /// The user's answer to an approval: allow | session | deny.
@@ -236,14 +260,36 @@ impl Mcp {
         }
     }
 
-    fn log(&self, app: &tauri::AppHandle, mut entry: Activity) {
-        entry.id = self.seq.fetch_add(1, Ordering::Relaxed);
+    /// Adds a running entry to the activity list and returns its id.
+    fn begin(&self, app: &tauri::AppHandle, mut entry: Activity) -> u64 {
+        entry.id = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
         entry.at = crate::monitor::now();
+        let id = entry.id;
+        let _ = app.emit("claude-activity", &entry);
         let mut a = self.activity.lock().unwrap();
         a.push_front(entry);
-        a.truncate(300);
-        drop(a);
-        let _ = app.emit("claude-changed", ());
+        a.truncate(MAX_ACTIVITY);
+        id
+    }
+
+    fn update(&self, app: &tauri::AppHandle, id: u64, f: impl FnOnce(&mut Activity)) {
+        let mut a = self.activity.lock().unwrap();
+        if let Some(e) = a.iter_mut().find(|e| e.id == id) {
+            f(e);
+            let _ = app.emit("claude-activity", &*e);
+        }
+    }
+
+    /// Live output of a command Claude is running.
+    fn output(&self, app: &tauri::AppHandle, id: u64, text: &str) {
+        let mut a = self.activity.lock().unwrap();
+        if let Some(e) = a.iter_mut().find(|e| e.id == id) {
+            if e.output.len() >= MAX_LIVE_OUTPUT {
+                return;
+            }
+            e.output.push_str(text);
+            let _ = app.emit("claude-output", OutputChunk { id, text: text.to_string(), len: e.output.len() });
+        }
     }
 
     pub fn stop(&self) {
@@ -391,7 +437,7 @@ async fn handle(app: &tauri::AppHandle, conn: u64, client: &str, msg: &Value) ->
         "tools/call" => {
             let name = msg["params"]["name"].as_str().unwrap_or("").to_string();
             let args = msg["params"]["arguments"].clone();
-            let ctx = Ctx { app: app.clone(), conn, client: client.to_string() };
+            let ctx = Ctx { app: app.clone(), conn, client: client.to_string(), act: 0 };
             let (text, is_error) = match call(&ctx, &name, &args).await {
                 Ok(t) => (t, false),
                 Err(e) => (e, true),
@@ -530,10 +576,13 @@ fn tool_defs() -> Vec<Value> {
     ]
 }
 
+#[derive(Clone)]
 struct Ctx {
     app: tauri::AppHandle,
     conn: u64,
     client: String,
+    /// The activity entry of the tool call being run (0 when none).
+    act: u64,
 }
 
 impl Ctx {
@@ -612,23 +661,77 @@ fn short(s: &str, n: usize) -> String {
     }
 }
 
-/// Runs a tool and records it in the activity list.
+/// Runs a tool and records it in the activity list as it happens.
 async fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<String, String> {
-    let target = ["connection", "host", "target", "name"].iter().find_map(|k| opt(args, k)).unwrap_or("").to_string();
+    let named = ["connection", "host", "target"].iter().find_map(|k| opt(args, k)).unwrap_or("");
+    let found = if named.is_empty() { None } else { resolve(&ctx.state(), named) };
+    let target = found.as_ref().map(|t| t.name.clone()).unwrap_or_else(|| opt(args, "name").unwrap_or(named).to_string());
     let detail = ["sql", "command", "path", "table", "source"].iter().find_map(|k| opt(args, k)).map(|s| short(s, 300)).unwrap_or_default();
-    let result = run_tool(ctx, name, args).await;
-    if name != "list_connections" {
-        let (outcome, summary) = match &result {
-            Ok(text) => ("ok", short(text.lines().last().unwrap_or(""), 160)),
-            Err(e) if e.starts_with(DECLINED) => ("denied", "Declined in Tusk".to_string()),
-            Err(e) => ("error", short(e, 200)),
-        };
-        ctx.state().mcp.log(
-            &ctx.app,
-            Activity { id: 0, at: 0, client: ctx.client.clone(), tool: name.into(), target, detail, outcome: outcome.into(), summary },
-        );
-    }
+    let input = match name {
+        "files_write" => format!("{}\n\n{}", opt(args, "path").unwrap_or(""), args["content"].as_str().unwrap_or("")),
+        "server_logs" => [opt(args, "source"), opt(args, "name")].into_iter().flatten().collect::<Vec<_>>().join(" "),
+        _ => ["sql", "command", "path", "table", "name"].iter().find_map(|k| opt(args, k)).unwrap_or("").to_string(),
+    };
+    let mcp = &ctx.state().mcp;
+    let act = mcp.begin(
+        &ctx.app,
+        Activity {
+            id: 0,
+            at: 0,
+            client: ctx.client.clone(),
+            tool: name.into(),
+            target,
+            target_kind: found.as_ref().map(|t| t.kind.to_string()).unwrap_or_default(),
+            target_id: found.map(|t| t.id).unwrap_or_default(),
+            database: opt(args, "database").unwrap_or("").to_string(),
+            detail,
+            outcome: "running".into(),
+            summary: String::new(),
+            input: clip(input, MAX_SHOWN),
+            result: String::new(),
+            output: String::new(),
+            ms: 0,
+        },
+    );
+    let ctx = Ctx { act, ..ctx.clone() };
+    let started = std::time::Instant::now();
+    let result = run_tool(&ctx, name, args).await;
+    let (outcome, summary) = match &result {
+        Ok(text) => ("ok", short(text.lines().last().unwrap_or(""), 160)),
+        Err(e) if e.starts_with(DECLINED) => ("denied", "Declined in Tusk".to_string()),
+        Err(e) => ("error", short(e, 200)),
+    };
+    let shown = clip(match &result {
+        Ok(t) | Err(t) => t.clone(),
+    }, MAX_SHOWN);
+    ctx.state().mcp.update(&ctx.app, act, |e| {
+        e.outcome = outcome.into();
+        e.summary = summary;
+        e.result = shown;
+        e.output.clear();
+        e.ms = started.elapsed().as_millis() as u64;
+    });
     result
+}
+
+/// The item Claude named, if exactly one matches.
+fn resolve(state: &AppState, name: &str) -> Option<Target> {
+    let n = name.trim();
+    let mut hits = targets(state).into_iter().filter(|t| t.id == n || t.name.eq_ignore_ascii_case(n));
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
+}
+
+fn clip(mut s: String, max: usize) -> String {
+    if s.len() > max {
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+        s.push_str("\n… (cut short here; Claude saw more)");
+    }
+    s
 }
 
 const DECLINED: &str = "The user declined this in Tusk.";
@@ -654,12 +757,14 @@ async fn approve(ctx: &Ctx, t: &Target, tool: &str, title: String, detail: Strin
         at: crate::monitor::now(),
     };
     let (tx, rx) = oneshot::channel();
+    mcp.update(&ctx.app, ctx.act, |e| e.outcome = "waiting".into());
     mcp.approvals.lock().unwrap().insert(id.clone(), (req.clone(), tx));
     let _ = ctx.app.emit("claude-approval", &req);
     let _ = ctx.app.emit("claude-changed", ());
     get_attention(&ctx.app, &req);
     let decision = tokio::time::timeout(APPROVAL_WAIT, rx).await;
     mcp.approvals.lock().unwrap().remove(&id);
+    mcp.update(&ctx.app, ctx.act, |e| e.outcome = "running".into());
     let _ = ctx.app.emit("claude-changed", ());
     match decision {
         Ok(Ok(d)) if d == "session" => {
@@ -926,13 +1031,31 @@ async fn db_activity(ctx: &Ctx, args: &Value) -> Result<String, String> {
 
 // ---- servers ----
 
-async fn exec(ctx: &Ctx, t: &Target, script: &str, timeout: Duration) -> Result<(String, Option<u32>), String> {
+/// Runs a script on a server. With `live`, its output shows in Tusk as it comes.
+async fn exec(ctx: &Ctx, t: &Target, script: &str, timeout: Duration, live: bool) -> Result<(String, Option<u32>), String> {
     let state = ctx.state();
     let creds = state.ssh_creds(&t.id).map_err(|e| e.message)?;
     let cancel = Arc::new(tokio::sync::Notify::new());
     let mut out = Vec::new();
+    let mut pending = Vec::new();
     let cmd = crate::ssh::posix(&format!("{}\n{script}", crate::pm2::PATH_PRELUDE));
-    let run = state.tunnels.exec_stream(creds, &cmd, cancel.clone(), |b| out.extend_from_slice(b));
+    let run = state.tunnels.exec_stream(creds, &cmd, cancel.clone(), |b| {
+        out.extend_from_slice(b);
+        if live && ctx.act != 0 {
+            pending.extend_from_slice(b);
+            // Hold back a character split across chunks.
+            let cut = match std::str::from_utf8(&pending) {
+                Ok(_) => pending.len(),
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                Err(_) => pending.len(),
+            };
+            if cut > 0 {
+                let text = String::from_utf8_lossy(&pending[..cut]).replace("\r\n", "\n");
+                state.mcp.output(&ctx.app, ctx.act, &text);
+                pending.drain(..cut);
+            }
+        }
+    });
     let status = match tokio::time::timeout(timeout, run).await {
         Ok(r) => r.map_err(|e| friendly(e, &t.name))?,
         Err(_) => {
@@ -949,7 +1072,7 @@ async fn server_status(ctx: &Ctx, args: &Value) -> Result<String, String> {
         "echo @os; (. /etc/os-release 2>/dev/null && echo \"$PRETTY_NAME\") || uname -sr\necho @uptime; uptime\n{}",
         crate::monitor::script(false)
     );
-    let (out, _) = exec(ctx, &t, &script, Duration::from_secs(60)).await?;
+    let (out, _) = exec(ctx, &t, &script, Duration::from_secs(60), false).await?;
     let s = crate::discover::sections(&out);
     let check = crate::monitor::parse(&out);
     let line = |k: &str| s.get(k).and_then(|l| l.first()).map(|x| x.trim().to_string()).unwrap_or_default();
@@ -999,7 +1122,7 @@ async fn server_logs(ctx: &Ctx, args: &Value) -> Result<String, String> {
         "file" => format!("tail -n {lines} -- {q} 2>&1"),
         other => return Err(format!("Unknown log source {other}")),
     };
-    let (out, _) = exec(ctx, &t, &script, Duration::from_secs(45)).await?;
+    let (out, _) = exec(ctx, &t, &script, Duration::from_secs(45), false).await?;
     Ok(if out.trim().is_empty() { "(no log lines)".into() } else { out })
 }
 
@@ -1009,7 +1132,7 @@ async fn server_run(ctx: &Ctx, args: &Value) -> Result<String, String> {
     let command = arg(args, "command")?;
     let secs = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 600);
     approve(ctx, &t, "server_run", "Run a command".into(), command.to_string()).await?;
-    let (out, status) = exec(ctx, &t, command, Duration::from_secs(secs)).await?;
+    let (out, status) = exec(ctx, &t, command, Duration::from_secs(secs), true).await?;
     Ok(format!("{}\n(exit status {})", out.trim_end(), status.map(|s| s.to_string()).unwrap_or_else(|| "unknown".into())))
 }
 
@@ -1038,7 +1161,7 @@ async fn run_saved_command(ctx: &Ctx, args: &Value) -> Result<String, String> {
         approve(ctx, &first, "run_saved_command", format!("Run the saved command \"{}\"", cmd.name), cmd.script.clone()).await?;
     }
     let script = format!("{}{}", if cmd.stop_on_error { "set -e\n" } else { "" }, cmd.script);
-    let runs = hosts.iter().map(|h| exec(ctx, h, &script, Duration::from_secs(600)));
+    let runs = hosts.iter().map(|h| exec(ctx, h, &script, Duration::from_secs(600), hosts.len() == 1));
     let results = futures_util::future::join_all(runs).await;
     let mut out = String::new();
     for (h, r) in hosts.iter().zip(results) {

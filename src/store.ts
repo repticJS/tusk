@@ -27,6 +27,8 @@ import {
   type ItemKind,
   type RdpConfig,
   type ClaudeAccess,
+  type ClaudeActivity,
+  type ClaudeOutputChunk,
   type ClaudeState,
   type MonitorSettings,
   type MonitorView,
@@ -329,6 +331,10 @@ interface State {
   claude: ClaudeState | null;
   /** Item whose Claude access is being edited from the sidebar. */
   claudeAccessItem: { id: string; name: string; folderId?: string | null; isFolder?: boolean } | null;
+  /** The side panel showing what Claude is doing. */
+  claudeLive: boolean;
+  /** Open that panel when Claude starts something. */
+  claudeFollow: boolean;
   /** A remote desktop tab shown full screen (the rest of Tusk hidden). */
   fullScreenTab: string | null;
   tunnelDialog: { open: boolean; editing?: Partial<TunnelConfig> };
@@ -357,6 +363,11 @@ interface State {
   openClaudeTab(): void;
   setClaudeAccess(id: string, access: ClaudeAccess | null): Promise<void>;
   editClaudeAccess(item: State["claudeAccessItem"]): void;
+  setClaudeLive(open: boolean): void;
+  setClaudeFollow(on: boolean): void;
+  /** A tool call started, changed or finished. */
+  claudeActivity(entry: ClaudeActivity): void;
+  claudeOutput(chunk: ClaudeOutputChunk): void;
   openRdpDialog(editing?: RdpConfig): void;
   closeRdpDialog(): void;
   deleteRdp(id: string): Promise<void>;
@@ -522,6 +533,8 @@ export const useApp = create<State>()(
       rdpDialog: { open: false },
       claude: null,
       claudeAccessItem: null,
+      claudeLive: false,
+      claudeFollow: true,
       fullScreenTab: null,
       tunnelDialog: { open: false },
       shareFolderId: null,
@@ -651,6 +664,29 @@ export const useApp = create<State>()(
       },
 
       editClaudeAccess: (claudeAccessItem) => set({ claudeAccessItem }),
+      setClaudeLive: (claudeLive) => set({ claudeLive }),
+      setClaudeFollow: (claudeFollow) => set({ claudeFollow }),
+
+      claudeActivity(entry) {
+        const c = get().claude;
+        if (!c) return void get().loadClaude();
+        const known = c.activity.some((a) => a.id === entry.id);
+        const activity = known ? c.activity.map((a) => (a.id === entry.id ? entry : a)) : [entry, ...c.activity].slice(0, 200);
+        set({ claude: { ...c, activity } });
+        if (!known && get().claudeFollow) set({ claudeLive: true });
+      },
+
+      claudeOutput({ id, text, len }) {
+        const c = get().claude;
+        if (!c) return;
+        set({
+          claude: {
+            ...c,
+            // A chunk that doesn't follow on is a repeat; the finished entry brings everything anyway.
+            activity: c.activity.map((a) => (a.id === id && a.output.length + text.length === len ? { ...a, output: a.output + text } : a)),
+          },
+        });
+      },
 
       openRdpDialog: (editing) => set({ rdpDialog: { open: true, editing } }),
       closeRdpDialog: () => set({ rdpDialog: { open: false } }),
@@ -1409,6 +1445,7 @@ export const useApp = create<State>()(
         filePanel: s.filePanel,
         statsBar: s.statsBar,
         collapsedFolders: s.collapsedFolders,
+        claudeFollow: s.claudeFollow,
         // SSH sessions don't survive a restart, so their tabs aren't restored.
         tabs: s.tabs.filter((t) => isDbTab(t)),
         activeTabId: isDbTab(s.tabs.find((t) => t.id === s.activeTabId)) ? s.activeTabId : null,

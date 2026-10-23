@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.0
+
+- Watch Claude work: a side panel shows each thing Claude does in Tusk as it happens, opening on its own when Claude starts (or click Claude in the status bar).
+- See the full SQL, command or file Claude asked for, a command's output as it runs, exactly what Claude got back, and how long it took.
+- Steps waiting for your OK are marked, and the status bar says when Claude is working.
+- Jump from a step to the same place in Tusk: open Claude's query in the editor, a terminal on that server, or its files.
+
 ## 0.14.0
 
 - Claude can use Tusk (MCP): let the Claude desktop app or Claude Code query your databases, check servers, read logs and files, and, if you allow it, change data, run commands, write files and run saved commands.

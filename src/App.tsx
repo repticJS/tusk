@@ -36,7 +36,7 @@ import { FilesTab } from "./components/FilesTab";
 import { FtpDialog } from "./components/FtpDialog";
 import { RdpDialog } from "./components/RdpDialog";
 import { RdpTab } from "./components/RdpTab";
-import { ClaudeAccessDialog, ClaudeApprovalDialog, ClaudeTab } from "./components/Claude";
+import { ClaudeAccessDialog, ClaudeApprovalDialog, ClaudeLivePanel, ClaudeTab } from "./components/Claude";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TerminalTab } from "./components/TerminalTab";
 import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
@@ -47,7 +47,7 @@ import { CommandDialog, CommandsTab, RunConfirm, RunTab } from "./components/Com
 import { ImportDialog, ShareDialog } from "./components/ShareDialogs";
 import { UpdateChip, UpdateDialog, useUpdateChecks } from "./components/Updater";
 import { Modal, useMenu } from "./components/ui";
-import { setPasswordPrompter, setSshPrompter } from "./lib/api";
+import { setPasswordPrompter, setSshPrompter, type ClaudeActivity, type ClaudeOutputChunk } from "./lib/api";
 import { activeConnectionOf, isTermTab, useApp, type Tab } from "./store";
 
 /** Ctrl+T / "+": another terminal to the same host, or a query tab on the active database. */
@@ -102,7 +102,11 @@ export default function App() {
     // Claude's requests and activity come from the backend as they happen.
     const unlistenClaude = listen("claude-changed", () => void useApp.getState().loadClaude());
     const unlistenApproval = listen("claude-approval", () => void useApp.getState().loadClaude());
+    const unlistenActivity = listen<ClaudeActivity>("claude-activity", (e) => useApp.getState().claudeActivity(e.payload));
+    const unlistenOutput = listen<ClaudeOutputChunk>("claude-output", (e) => useApp.getState().claudeOutput(e.payload));
     return () => {
+      void unlistenActivity.then((f) => f());
+      void unlistenOutput.then((f) => f());
       void unlisten.then((f) => f());
       void unlistenClaude.then((f) => f());
       void unlistenApproval.then((f) => f());
@@ -159,7 +163,8 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <Group orientation="horizontal" className="min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1">
+      <Group orientation="horizontal" className="min-h-0 min-w-0 flex-1">
         <Panel defaultSize="260px" minSize="236px" maxSize="50%">
           <Sidebar />
         </Panel>
@@ -231,6 +236,8 @@ export default function App() {
           </div>
         </Panel>
       </Group>
+      <ClaudeLivePanel />
+      </div>
       <StatusBar />
       {connectionDialog.open && <ConnectionDialog key={connectionDialog.editing?.id ?? "new"} />}
       {sshDialog.open && <SshDialog key={sshDialog.editing?.id ?? "new"} />}
@@ -568,17 +575,26 @@ function Welcome() {
 
 /** Status bar: whether Claude can reach Tusk (shown while access is on). */
 function ClaudeChip() {
-  const c = useApp(useShallow((s) => ({ on: !!s.claude?.enabled, clients: s.claude?.clients.length ?? 0, waiting: s.claude?.pending.length ?? 0 })));
+  const c = useApp(
+    useShallow((s) => ({
+      on: !!s.claude?.enabled,
+      clients: s.claude?.clients.length ?? 0,
+      waiting: s.claude?.pending.length ?? 0,
+      working: s.claude?.activity.some((a) => a.outcome === "running") ?? false,
+      live: s.claudeLive,
+    })),
+  );
   if (!c.on) return null;
   return (
     <button
-      className={`flex items-center gap-1 hover:text-text ${c.waiting ? "text-warn" : ""}`}
-      title="Claude's access to Tusk"
+      className={`flex items-center gap-1 hover:text-text ${c.waiting ? "text-warn" : c.live ? "text-text" : ""}`}
+      title={c.live ? "Hide what Claude is doing" : "Show what Claude is doing"}
       aria-label="Claude"
-      onClick={() => useApp.getState().openClaudeTab()}
+      aria-pressed={c.live}
+      onClick={() => useApp.getState().setClaudeLive(!c.live)}
     >
       <Bot size={11} className={c.clients ? "text-ok" : ""} />
-      {c.waiting ? "Claude is waiting for you" : c.clients ? "Claude connected" : "Claude on"}
+      {c.waiting ? "Claude is waiting for you" : c.working ? "Claude is working…" : c.clients ? "Claude connected" : "Claude on"}
     </button>
   );
 }

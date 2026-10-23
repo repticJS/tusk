@@ -859,9 +859,26 @@ export interface ClaudeActivity {
   client: string;
   tool: string;
   target: string;
+  targetKind: "" | "database" | "server" | "ftp";
+  targetId: string;
+  database: string;
   detail: string;
-  outcome: "ok" | "error" | "denied";
+  /** "waiting" is waiting for the user's OK. */
+  outcome: "running" | "waiting" | "ok" | "error" | "denied";
   summary: string;
+  /** The whole request: SQL, command, path… */
+  input: string;
+  /** What Claude got back. */
+  result: string;
+  /** A command's output while it runs. */
+  output: string;
+  ms: number;
+}
+
+export interface ClaudeOutputChunk {
+  id: number;
+  text: string;
+  len: number;
 }
 
 export interface ClaudeState {
