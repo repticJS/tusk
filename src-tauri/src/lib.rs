@@ -3,6 +3,7 @@ mod discover;
 mod error;
 mod files;
 mod local;
+mod mcp;
 mod monitor;
 mod pm2;
 mod rdp;
@@ -28,6 +29,7 @@ struct AppState {
     transfers: sftp::Transfers,
     files: files::FileSessions,
     rdp: std::sync::Arc<rdp::RdpSessions>,
+    mcp: mcp::Mcp,
     tunnels: std::sync::Arc<tunnel::Tunnels>,
     local: local::LocalTerms,
     /// Shells found on this PC, detected once.
@@ -72,6 +74,34 @@ impl AppState {
         };
         let creds = self.ssh_creds(host_id)?;
         Ok(Some(self.tunnels.db_port(tunnel_id, &config.host, config.port, creds).await?))
+    }
+
+    /// Connects to an SSH host (SFTP) or FTP site for file access; also
+    /// returns its start folder.
+    async fn open_remote(&self, kind: &str, id: &str) -> AppResult<(files::Remote, Option<String>)> {
+        Ok(match kind {
+            "ssh" => {
+                let creds = self.ssh_creds(id)?;
+                let accept = self.tunnels.take_accepted(id);
+                let (handle, _) = ssh::connect(&creds.config, creds.secret.as_deref(), accept, &creds.known_hosts, Default::default())
+                    .await
+                    .map_err(|e| tunnel::ssh_error(e, &creds.config))?;
+                let conn = std::sync::Arc::new(ssh::Connection { handle, sftp: Default::default() });
+                (files::Remote::Sftp(conn), creds.config.start_dir)
+            }
+            "ftp" => {
+                let site = self.store.lock().unwrap().get_ftp(id)?;
+                let password = match self.ftp_password(id) {
+                    Some(p) => p,
+                    None if files::is_anonymous(&site) => "anonymous@".into(),
+                    None => return Err(AppError::kind("FTP_PASSWORD_REQUIRED", format!("Password for {}", site.name))),
+                };
+                let ftp = files::ftp_connect(&site, &password).await?;
+                let start = site.start_dir.clone();
+                (files::Remote::ftp(site, password, ftp), start)
+            }
+            other => return Err(AppError::msg(format!("Unknown server type {other}"))),
+        })
     }
 
     fn rdp_password(&self, id: &str) -> Option<String> {
@@ -866,29 +896,7 @@ struct FilesOpened {
 /// when the user needs to be asked something.
 #[tauri::command]
 async fn files_open(state: State<'_, AppState>, session_id: String, kind: String, id: String) -> AppResult<FilesOpened> {
-    let (remote, start_dir) = match kind.as_str() {
-        "ssh" => {
-            let creds = state.ssh_creds(&id)?;
-            let accept = state.tunnels.take_accepted(&id);
-            let (handle, _) = ssh::connect(&creds.config, creds.secret.as_deref(), accept, &creds.known_hosts, Default::default())
-                .await
-                .map_err(|e| tunnel::ssh_error(e, &creds.config))?;
-            let conn = std::sync::Arc::new(ssh::Connection { handle, sftp: Default::default() });
-            (files::Remote::Sftp(conn), creds.config.start_dir)
-        }
-        "ftp" => {
-            let site = state.store.lock().unwrap().get_ftp(&id)?;
-            let password = match state.ftp_password(&id) {
-                Some(p) => p,
-                None if files::is_anonymous(&site) => "anonymous@".into(),
-                None => return Err(AppError::kind("FTP_PASSWORD_REQUIRED", format!("Password for {}", site.name))),
-            };
-            let ftp = files::ftp_connect(&site, &password).await?;
-            let start = site.start_dir.clone();
-            (files::Remote::ftp(site, password, ftp), start)
-        }
-        other => return Err(AppError::msg(format!("Unknown server type {other}"))),
-    };
+    let (remote, start_dir) = state.open_remote(&kind, &id).await?;
     let (path, home) = remote.start_paths(start_dir.as_deref()).await?;
     state.files.insert(session_id, remote).await;
     Ok(FilesOpened { path, home })
@@ -1076,6 +1084,63 @@ fn rdp_close(state: State<'_, AppState>, session_id: String) {
     state.rdp.close(&session_id);
 }
 
+// ---- Claude (MCP) ----
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeState {
+    enabled: bool,
+    access: std::collections::HashMap<String, store::ClaudeAccess>,
+    #[serde(flatten)]
+    view: mcp::McpView,
+    setup: mcp::Setup,
+}
+
+#[tauri::command]
+fn claude_state(state: State<'_, AppState>) -> ClaudeState {
+    let settings = state.store.lock().unwrap().claude();
+    ClaudeState { enabled: settings.enabled, access: settings.access, view: state.mcp.view(), setup: mcp::setup() }
+}
+
+/// Turns Claude's access to Tusk on or off (the local server runs only while on).
+#[tauri::command]
+async fn claude_set_enabled(app: tauri::AppHandle, state: State<'_, AppState>, on: bool) -> AppResult<()> {
+    state.store.lock().unwrap().set_claude_enabled(on)?;
+    if on {
+        mcp::start(app).await
+    } else {
+        state.mcp.stop();
+        let _ = app.emit("claude-changed", ());
+        Ok(())
+    }
+}
+
+/// What Claude may do with an item; None follows its folder again.
+#[tauri::command]
+fn claude_set_access(app: tauri::AppHandle, state: State<'_, AppState>, id: String, access: Option<store::ClaudeAccess>) -> AppResult<()> {
+    state.store.lock().unwrap().set_claude_access(&id, access)?;
+    let _ = app.emit("claude-changed", ());
+    Ok(())
+}
+
+/// The user's answer to a request: allow | session | deny.
+#[tauri::command]
+fn claude_decide(state: State<'_, AppState>, id: String, decision: String) {
+    state.mcp.decide(&id, &decision);
+}
+
+#[tauri::command]
+fn claude_clear_activity(app: tauri::AppHandle, state: State<'_, AppState>) {
+    state.mcp.clear_activity();
+    let _ = app.emit("claude-changed", ());
+}
+
+/// Adds Tusk to the Claude desktop app's settings; returns the files changed.
+#[tauri::command]
+fn claude_install_desktop() -> AppResult<Vec<String>> {
+    mcp::install_desktop()
+}
+
 // ---- discovery ----
 
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1259,6 +1324,11 @@ fn read_text_file(path: String) -> AppResult<String> {
     std::fs::read_to_string(path).map_err(AppError::from)
 }
 
+/// `tusk --mcp`: the bridge Claude starts (no window).
+pub fn mcp_bridge() {
+    mcp::bridge()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1277,6 +1347,7 @@ pub fn run() {
                 transfers: sftp::Transfers::default(),
                 files: Default::default(),
                 rdp: Default::default(),
+                mcp: Default::default(),
                 tunnels: Default::default(),
                 local: local::LocalTerms::default(),
                 shells: Mutex::new(None),
@@ -1284,6 +1355,12 @@ pub fn run() {
                 runs: Default::default(),
             });
             start_monitor(app.handle().clone());
+            if app.state::<AppState>().store.lock().unwrap().claude().enabled {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = mcp::start(handle).await;
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1351,6 +1428,12 @@ pub fn run() {
             sftp_cancel,
             list_ftp_sites,
             list_rdp,
+            claude_state,
+            claude_set_enabled,
+            claude_set_access,
+            claude_decide,
+            claude_clear_activity,
+            claude_install_desktop,
             save_rdp,
             delete_rdp,
             set_rdp_password,

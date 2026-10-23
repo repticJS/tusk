@@ -7,6 +7,7 @@ import {
   FolderSync,
   LayoutGrid,
   ScreenShare,
+  Bot,
   Monitor,
   Moon,
   Plus,
@@ -35,6 +36,7 @@ import { FilesTab } from "./components/FilesTab";
 import { FtpDialog } from "./components/FtpDialog";
 import { RdpDialog } from "./components/RdpDialog";
 import { RdpTab } from "./components/RdpTab";
+import { ClaudeAccessDialog, ClaudeApprovalDialog, ClaudeTab } from "./components/Claude";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TerminalTab } from "./components/TerminalTab";
 import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
@@ -95,8 +97,16 @@ export default function App() {
     void useApp.getState().loadShells();
     void useApp.getState().loadMonitor();
     // The backend checks hosts in the background and says when anything changed.
+    void useApp.getState().loadClaude();
     const unlisten = listen("monitor-changed", () => void useApp.getState().loadMonitor());
-    return () => void unlisten.then((f) => f());
+    // Claude's requests and activity come from the backend as they happen.
+    const unlistenClaude = listen("claude-changed", () => void useApp.getState().loadClaude());
+    const unlistenApproval = listen("claude-approval", () => void useApp.getState().loadClaude());
+    return () => {
+      void unlisten.then((f) => f());
+      void unlistenClaude.then((f) => f());
+      void unlistenApproval.then((f) => f());
+    };
   }, []);
 
   // Global shortcuts.
@@ -208,6 +218,8 @@ export default function App() {
                     <FilesTab tab={t} active={t.id === activeTabId} />
                   ) : t.kind === "rdp" ? (
                     <RdpTab tab={t} active={t.id === activeTabId} />
+                  ) : t.kind === "claude" ? (
+                    <ClaudeTab tab={t} active={t.id === activeTabId} />
                   ) : (
                     <RemoteFileTab tab={t} active={t.id === activeTabId} />
                   )}
@@ -224,6 +236,8 @@ export default function App() {
       {sshDialog.open && <SshDialog key={sshDialog.editing?.id ?? "new"} />}
       {ftpDialog.open && <FtpDialog key={ftpDialog.editing?.id || "new"} />}
       {rdpDialog.open && <RdpDialog key={rdpDialog.editing?.id || "new"} />}
+      <ClaudeAccessDialog />
+      <ClaudeApprovalDialog />
       {tunnelDialog.open && <TunnelDialog key={tunnelDialog.editing?.id || "new"} />}
       <ShareDialog />
       <CommandDialog />
@@ -263,6 +277,7 @@ function TabBar() {
         {tabs.map((t) => {
           const conn =
             t.kind === "tunnels" ||
+            t.kind === "claude" ||
             t.kind === "local" ||
             t.kind === "discover" ||
             t.kind === "monitor" ||
@@ -308,6 +323,8 @@ function TabBar() {
                         ? `Files${conn ? `: ${conn.name}` : ""}`
                       : t.kind === "rdp"
                         ? `Remote desktop: ${conn?.name ?? ""}`
+                      : t.kind === "claude"
+                        ? "Claude's access to Tusk"
                       : t.kind === "commands" || t.kind === "run"
                         ? t.title
                   : t.kind === "local"
@@ -347,6 +364,8 @@ function TabBar() {
                   <FolderSync size={13} />
                 ) : t.kind === "rdp" ? (
                   <ScreenShare size={13} />
+                ) : t.kind === "claude" ? (
+                  <Bot size={13} />
                 ) : (
                   <FileCode2 size={13} />
                 )}
@@ -547,6 +566,23 @@ function Welcome() {
   );
 }
 
+/** Status bar: whether Claude can reach Tusk (shown while access is on). */
+function ClaudeChip() {
+  const c = useApp(useShallow((s) => ({ on: !!s.claude?.enabled, clients: s.claude?.clients.length ?? 0, waiting: s.claude?.pending.length ?? 0 })));
+  if (!c.on) return null;
+  return (
+    <button
+      className={`flex items-center gap-1 hover:text-text ${c.waiting ? "text-warn" : ""}`}
+      title="Claude's access to Tusk"
+      aria-label="Claude"
+      onClick={() => useApp.getState().openClaudeTab()}
+    >
+      <Bot size={11} className={c.clients ? "text-ok" : ""} />
+      {c.waiting ? "Claude is waiting for you" : c.clients ? "Claude connected" : "Claude on"}
+    </button>
+  );
+}
+
 function StatusBar() {
   const theme = useApp((s) => s.theme);
   const setTheme = useApp((s) => s.setTheme);
@@ -603,6 +639,7 @@ function StatusBar() {
         </button>
       )}
       <MonitorBell />
+      <ClaudeChip />
       <UpdateChip />
       <button className="flex items-center gap-1 hover:text-text" onClick={() => setPaletteOpen(true)}>
         <Search size={11} /> Ctrl+P

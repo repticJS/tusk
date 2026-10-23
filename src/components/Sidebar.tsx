@@ -34,6 +34,7 @@ import {
   FolderSync,
   Server,
   ScreenShare,
+  Bot,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ConnectionConfig, Folder, FtpSite, ItemKind, RdpConfig, SshHost } from "../lib/api";
@@ -43,6 +44,33 @@ import { qualified } from "../lib/sql";
 import { clickSuppressed, startTreeDrag, useTreeDrag, type DragItem } from "../lib/treeDrag";
 import { cacheKey, metaSession, useApp } from "../store";
 import { DropdownButton, Modal, Spinner, useMenu, type MenuEntry } from "./ui";
+import { accessLabel, effectiveAccess } from "./Claude";
+
+/** "Claude access…" for an item's menu. */
+function claudeEntry(id: string, name: string, folderId: string | null | undefined, isFolder = false): MenuEntry {
+  return {
+    label: "Claude access…",
+    icon: <Bot size={13} />,
+    onClick: () => useApp.getState().editClaudeAccess({ id, name, folderId: folderId ?? null, isFolder }),
+  };
+}
+
+/** A small mark on items Claude may use. */
+function ClaudeMark({ id, folderId }: { id: string; folderId?: string | null }) {
+  // A string, so the selector's result is stable between renders.
+  const key = useApp((s) => {
+    if (!s.claude?.enabled) return "off";
+    const a = effectiveAccess(s.claude.access, id, folderId, s.folders).access;
+    return a.level === "write" ? (a.ask ? "write-ask" : "write") : a.level;
+  });
+  if (key === "off") return null;
+  const a = { level: key.startsWith("write") ? ("write" as const) : ("read" as const), ask: key === "write-ask" };
+  return (
+    <span title={`Claude: ${accessLabel(a).toLowerCase()}`} data-claude-mark={a.level} className="ml-1 inline-flex align-middle">
+      <Bot size={11} className={a.level === "write" ? "text-warn" : "text-accent"} />
+    </span>
+  );
+}
 
 function compact(n: number): string {
   if (n < 1000) return String(n);
@@ -384,6 +412,7 @@ function FolderNode({ folder, depth, tree }: { folder: Folder; depth: number; tr
             },
             "separator",
             { label: "Rename", icon: <Pencil size={13} />, hint: "F2", onClick: () => setRenamingFolder(folder.id) },
+            claudeEntry(folder.id, folder.name, folder.parentId, true),
             {
               label: "Move to…",
               icon: <FolderInput size={13} />,
@@ -420,7 +449,10 @@ function FolderNode({ folder, depth, tree }: { folder: Folder; depth: number; tr
             aria-label="Folder name"
           />
         ) : (
-          <span className="min-w-0 flex-1 truncate font-medium">{folder.name}</span>
+          <span className="min-w-0 flex-1 truncate font-medium">
+            {folder.name}
+            <ClaudeMark id={folder.id} folderId={folder.parentId} />
+          </span>
         )}
         {!renaming && <span className="shrink-0 text-[11px] text-faint">{count || ""}</span>}
       </div>
@@ -570,7 +602,12 @@ function SshNode({
             )}
           </span>
         }
-        label={<span className="font-medium">{host.name}</span>}
+        label={
+          <>
+            <span className="font-medium">{host.name}</span>
+            <ClaudeMark id={host.id} folderId={host.folderId} />
+          </>
+        }
         right={
           health ? (
             <button
@@ -633,6 +670,7 @@ function SshNode({
               onClick: () => openSshDialog({ ...host, id: "", name: `${host.name} copy` }),
             },
             { label: "Copy ssh command", icon: <Copy size={13} />, onClick: () => void navigator.clipboard.writeText(`ssh ${host.port === 22 ? "" : `-p ${host.port} `}${host.user}@${host.host}`) },
+            claudeEntry(host.id, host.name, host.folderId),
             {
               label: "Move to…",
               icon: <FolderInput size={13} />,
@@ -706,7 +744,12 @@ function FtpNode({
             {openTabs && <span className="absolute -right-0.5 -bottom-0.5 h-1.5 w-1.5 rounded-full bg-ok ring-2 ring-panel" />}
           </span>
         }
-        label={<span className="font-medium">{site.name}</span>}
+        label={
+          <>
+            <span className="font-medium">{site.name}</span>
+            <ClaudeMark id={site.id} folderId={site.folderId} />
+          </>
+        }
         right={<span className="font-mono">{site.protocol.toUpperCase()}</span>}
         title={`${target}\nClick to open the file manager`}
         onClick={() => !clickSuppressed() && open()}
@@ -721,6 +764,7 @@ function FtpNode({
               onClick: () => useApp.getState().openFtpDialog({ ...site, id: "", name: `${site.name} copy` }),
             },
             { label: "Copy address", icon: <Copy size={13} />, onClick: () => void navigator.clipboard.writeText(target) },
+            claudeEntry(site.id, site.name, site.folderId),
             {
               label: "Move to…",
               icon: <FolderInput size={13} />,
@@ -960,6 +1004,7 @@ function ConnectionNode({ conn, ...p }: NodeProps & { conn: ConnectionConfig }) 
       icon: <Copy size={13} />,
       onClick: () => openConnectionDialog({ ...conn, id: "", name: `${conn.name} copy` }),
     },
+    claudeEntry(conn.id, conn.name, conn.folderId),
     {
       label: "Move to…",
       icon: <FolderInput size={13} />,
@@ -983,7 +1028,12 @@ function ConnectionNode({ conn, ...p }: NodeProps & { conn: ConnectionConfig }) 
             )}
           </span>
         }
-        label={<span className="font-medium">{conn.name}</span>}
+        label={
+          <>
+            <span className="font-medium">{conn.name}</span>
+            <ClaudeMark id={conn.id} folderId={conn.folderId} />
+          </>
+        }
         right={
           status?.state === "connecting" ? (
             <Spinner size={11} />

@@ -363,9 +363,9 @@ impl Remote {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextFile {
-    content: Option<String>,
+    pub content: Option<String>,
     size: u64,
-    reason: Option<String>,
+    pub reason: Option<String>,
 }
 
 /// Open file manager sessions by id (one per Files tab).

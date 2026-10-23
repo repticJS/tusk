@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.0
+
+- Claude can use Tusk (MCP): let the Claude desktop app or Claude Code query your databases, check servers, read logs and files, and, if you allow it, change data, run commands, write files and run saved commands.
+- Off by default: turn it on in the new Claude tab, then give each connection, server, FTP site or folder read-only or read & write access.
+- Read-only queries can't change anything (one statement, in a read-only transaction). Changes ask for your OK in Tusk unless you say otherwise.
+- One click adds Tusk to the Claude app; Claude Code gets a ready-made command. Everything Claude does is listed in the Claude tab.
+
 ## 0.13.0
 
 - Remote desktop: connect to Windows PCs and servers (RDP) in a Tusk tab. Save the user, domain and password, put connections in folders and share them.

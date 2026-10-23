@@ -8,6 +8,7 @@ import {
   ftpApi,
   localApi,
   rdpApi,
+  claudeApi,
   sshApi,
   tunnelApi,
   withSshPrompts,
@@ -25,6 +26,8 @@ import {
   type FtpSite,
   type ItemKind,
   type RdpConfig,
+  type ClaudeAccess,
+  type ClaudeState,
   type MonitorSettings,
   type MonitorView,
   type Pm2Action,
@@ -165,6 +168,13 @@ export interface RemoteFileTab {
   filesId?: string;
 }
 
+/** Claude's access to Tusk: switch, setup, permissions, activity. */
+export interface ClaudeTab {
+  id: string;
+  kind: "claude";
+  title: string;
+}
+
 /** A remote desktop (RDP) session. */
 export interface RdpTab {
   id: string;
@@ -198,6 +208,7 @@ export type Tab =
   | RemoteFileTab
   | FilesTab
   | RdpTab
+  | ClaudeTab
   | TunnelsTab
   | DiscoverTab
   | MonitorTab
@@ -315,6 +326,9 @@ interface State {
   sshDialog: { open: boolean; editing?: SshHost };
   ftpDialog: { open: boolean; editing?: FtpSite };
   rdpDialog: { open: boolean; editing?: RdpConfig };
+  claude: ClaudeState | null;
+  /** Item whose Claude access is being edited from the sidebar. */
+  claudeAccessItem: { id: string; name: string; folderId?: string | null; isFolder?: boolean } | null;
   /** A remote desktop tab shown full screen (the rest of Tusk hidden). */
   fullScreenTab: string | null;
   tunnelDialog: { open: boolean; editing?: Partial<TunnelConfig> };
@@ -339,6 +353,10 @@ interface State {
   deleteSshHost(id: string): Promise<void>;
   openTerminalTab(hostId: string, opts?: TerminalOptions): void;
   openRemoteFile(termId: string, hostId: string, path: string, filesId?: string): void;
+  loadClaude(): Promise<void>;
+  openClaudeTab(): void;
+  setClaudeAccess(id: string, access: ClaudeAccess | null): Promise<void>;
+  editClaudeAccess(item: State["claudeAccessItem"]): void;
   openRdpDialog(editing?: RdpConfig): void;
   closeRdpDialog(): void;
   deleteRdp(id: string): Promise<void>;
@@ -502,6 +520,8 @@ export const useApp = create<State>()(
       sshDialog: { open: false },
       ftpDialog: { open: false },
       rdpDialog: { open: false },
+      claude: null,
+      claudeAccessItem: null,
       fullScreenTab: null,
       tunnelDialog: { open: false },
       shareFolderId: null,
@@ -543,7 +563,8 @@ export const useApp = create<State>()(
               ? !t.target || ids.has(t.target.id)
               : t.kind === "rdp"
                 ? ids.has(t.connId)
-                : t.kind === "tunnels" ||
+                : t.kind === "claude" ||
+                  t.kind === "tunnels" ||
                 t.kind === "discover" ||
                 t.kind === "monitor" ||
                 t.kind === "commands" ||
@@ -603,6 +624,33 @@ export const useApp = create<State>()(
         const tab: RemoteFileTab = { id, kind: "remote", termId, hostId, path, filesId, title: path.split("/").pop() || path };
         set((s) => ({ tabs: [...s.tabs, tab], activeTabId: id }));
       },
+
+      async loadClaude() {
+        try {
+          set({ claude: await claudeApi.state() });
+        } catch {
+          // Shown as loading in the Claude tab.
+        }
+      },
+
+      openClaudeTab() {
+        const existing = get().tabs.find((t) => t.kind === "claude");
+        if (existing) return set({ activeTabId: existing.id });
+        const tab: ClaudeTab = { id: uid(), kind: "claude", title: "Claude" };
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
+        void get().loadClaude();
+      },
+
+      async setClaudeAccess(id, access) {
+        try {
+          await claudeApi.setAccess(id, access);
+        } catch (e) {
+          get().showToast(e instanceof Error ? e.message : String(e), "error");
+        }
+        await get().loadClaude();
+      },
+
+      editClaudeAccess: (claudeAccessItem) => set({ claudeAccessItem }),
 
       openRdpDialog: (editing) => set({ rdpDialog: { open: true, editing } }),
       closeRdpDialog: () => set({ rdpDialog: { open: false } }),

@@ -39,6 +39,8 @@ pub struct Session {
     tls: MakeTlsConnector,
     notices: Arc<StdMutex<Vec<String>>>,
     server_version: String,
+    /// Claude's statements run one at a time, each in its own transaction.
+    guard: tokio::sync::Mutex<()>,
 }
 
 #[derive(Serialize, Clone)]
@@ -197,7 +199,7 @@ pub async fn connect(
         Err(_) => String::new(),
     };
 
-    Ok(Session { cancel: client.cancel_token(), client, tls, notices, server_version })
+    Ok(Session { cancel: client.cancel_token(), client, tls, notices, server_version, guard: Default::default() })
 }
 
 impl Session {
@@ -328,6 +330,38 @@ impl Session {
             last.notices = notices;
         }
         out.last().map(|r| r.error.is_some()).unwrap_or(false)
+    }
+
+    /// Runs exactly one statement in its own transaction, for Claude. With
+    /// `read_only` the transaction is READ ONLY and always rolled back, so
+    /// nothing can change; otherwise it commits when the statement succeeds.
+    pub async fn run_guarded(&self, sql: &str, max_rows: usize, read_only: bool, timeout_secs: u32) -> AppResult<StatementResult> {
+        let _one_at_a_time = self.guard.lock().await;
+        // Preparing proves it's a single statement without running anything:
+        // a script like "COMMIT; DROP TABLE x" can't sneak out of the transaction.
+        if let Err(e) = self.client.prepare(sql).await {
+            let e = AppError::from(e);
+            if e.code.as_deref() == Some("42601") && e.message.contains("multiple commands") {
+                return Err(AppError::msg("Run one statement at a time"));
+            }
+            return Err(e);
+        }
+        // The SELECT makes the transaction start, so it can no longer be
+        // switched to read-write.
+        let begin = if read_only { "BEGIN READ ONLY; SELECT 1" } else { "BEGIN" };
+        self.client.batch_execute(begin).await?;
+        let _ = self.client.batch_execute(&format!("SET LOCAL statement_timeout = '{timeout_secs}s'")).await;
+        let mut out = Vec::new();
+        let failed = self.run_one(0, sql, max_rows, &mut out).await;
+        let end = if read_only || failed { "ROLLBACK" } else { "COMMIT" };
+        let ended = self.client.batch_execute(end).await;
+        self.take_notices();
+        let result = out.pop().unwrap_or_default();
+        if let Some(e) = result.error {
+            return Err(e);
+        }
+        ended?;
+        Ok(result)
     }
 
     /// Runs a multi-statement script as one simple-protocol message. Postgres

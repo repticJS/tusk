@@ -132,6 +132,22 @@ Connect to Windows PCs and servers (and Linux machines running xrdp) inside a Tu
 
 Keys typed in a remote desktop go to it, except Ctrl+Shift+W / T / P, which stay with Tusk as in terminals.
 
+### Claude (MCP)
+
+Let Claude, the desktop app or Claude Code, use your databases and servers through Tusk. Open the **Claude** tab (Ctrl+P → Claude, or right-click anything → **Claude access…**):
+
+1. Turn on **Let Claude use Tusk**. Tusk then listens on this PC only, and only while it's open.
+2. **Connect Claude:** **Add Tusk to Claude** puts Tusk in the Claude app's settings (restart Claude afterwards). For Claude Code, run the `claude mcp add …` command shown.
+3. Choose what Claude may use. Everything starts with **no access**; give a connection, server, FTP site or whole folder **Read only** or **Read & write**.
+
+| Claude can | Needs |
+|---|---|
+| List tables, describe them, run queries, see sessions and locks | Read only. Queries run one statement at a time in a read-only transaction that's always rolled back |
+| Check a server (disks, memory, failed services, PM2 apps, containers), read logs, list and read files | Read only |
+| Change data or schema, run shell commands, write files, run saved commands | Read & write. Tusk asks you first (Deny / Allow once / Allow for this session) unless you untick **Ask before changes** |
+
+Claude refers to connections by name; passwords and keys stay in Tusk. Everything Claude does is listed in the Claude tab, and the status bar shows when Claude is connected or waiting for you.
+
 ### Shortcuts
 
 | Keys | Action |
@@ -181,6 +197,7 @@ src-tauri/src/
   sftp.rs      SFTP over a terminal's connection: listing, transfers, remote editing, shell cwd
   files.rs     file manager: SFTP / FTP / FTPS sessions, local folders, queued transfers
   rdp.rs       remote desktop sessions (IronRDP): certificates, sign-in, screen updates, input
+  mcp.rs       Claude access: the `tusk --mcp` bridge, local MCP server, tools, approvals, activity
   monitor.rs   background checks of SSH hosts, problems and alerts
   share.rs     folder share codes: collecting, encryption, importing with new ids
   pm2.rs       PM2 apps: listing (pm2 jlist), actions, new apps, logs/monit terminals

@@ -147,6 +147,28 @@ fn depth32() -> u32 {
     32
 }
 
+/// What Claude may do with one item (a connection, host, site or folder).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeAccess {
+    /// off | read | write
+    pub level: String,
+    /// Ask before every change (write access only).
+    #[serde(default = "yes")]
+    pub ask: bool,
+}
+
+/// Letting Claude (desktop app or Claude Code) use Tusk through MCP.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ClaudeSettings {
+    /// The local MCP server runs only while this is on.
+    pub enabled: bool,
+    /// By item id (connections, SSH hosts, FTP sites, folders). Items without
+    /// an entry inherit from their folder; the top level is off.
+    pub access: std::collections::HashMap<String, ClaudeAccess>,
+}
+
 /// Something that can be moved between folders.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +195,8 @@ struct StoreFile {
     ftp_sites: Vec<FtpSite>,
     #[serde(default)]
     rdp: Vec<RdpConfig>,
+    #[serde(default)]
+    claude: ClaudeSettings,
 }
 
 /// A named shell script to run on one or more SSH hosts (deploys, restarts…).
@@ -412,6 +436,52 @@ impl Store {
     /// Certificates of remote desktops the user has trusted: "host:port" → fingerprint.
     pub fn rdp_known_path(&self) -> PathBuf {
         self.dir.join("rdp_known_hosts.json")
+    }
+
+    // ---- Claude ----
+
+    pub fn claude(&self) -> ClaudeSettings {
+        self.file.claude.clone()
+    }
+
+    pub fn set_claude_enabled(&mut self, on: bool) -> AppResult<()> {
+        self.file.claude.enabled = on;
+        self.save()
+    }
+
+    /// None removes the item's own setting, so it follows its folder again.
+    pub fn set_claude_access(&mut self, id: &str, access: Option<ClaudeAccess>) -> AppResult<()> {
+        match access {
+            Some(a) => {
+                if !matches!(a.level.as_str(), "off" | "read" | "write") {
+                    return Err(AppError::msg(format!("Unknown access level {}", a.level)));
+                }
+                self.file.claude.access.insert(id.to_string(), a);
+            }
+            None => {
+                self.file.claude.access.remove(id);
+            }
+        }
+        self.save()
+    }
+
+    /// What Claude may do with an item in `folder_id`: its own setting, else
+    /// the nearest folder's, else off.
+    pub fn claude_access(&self, id: &str, folder_id: Option<&str>) -> ClaudeAccess {
+        let off = ClaudeAccess { level: "off".into(), ask: true };
+        let map = &self.file.claude.access;
+        if let Some(a) = map.get(id) {
+            return a.clone();
+        }
+        let mut cur = folder_id.map(str::to_string);
+        for _ in 0..=self.file.folders.len() {
+            let Some(f) = cur else { break };
+            if let Some(a) = map.get(&f) {
+                return a.clone();
+            }
+            cur = self.file.folders.iter().find(|x| x.id == f).and_then(|x| x.parent_id.clone());
+        }
+        off
     }
 
     // ---- saved commands ----
@@ -857,6 +927,23 @@ mod tests {
         assert!(s.list_folders().iter().all(|f| f.id != "inner"));
         assert_eq!(s.list_folders().iter().find(|f| f.id == "deep").unwrap().parent_id.as_deref(), Some("outer"));
         assert_eq!(s.get("db").unwrap().folder_id.as_deref(), Some("outer"));
+    }
+
+    #[test]
+    fn claude_access_is_off_unless_given_and_inherits_from_folders() {
+        let mut s = store();
+        s.save_folder(folder("prod", None)).unwrap();
+        s.save_folder(folder("web", Some("prod"))).unwrap();
+        s.upsert(conn("db", Some("web"))).unwrap();
+        assert_eq!(s.claude_access("db", Some("web")).level, "off");
+        s.set_claude_access("prod", Some(ClaudeAccess { level: "read".into(), ask: true })).unwrap();
+        assert_eq!(s.claude_access("db", Some("web")).level, "read");
+        s.set_claude_access("db", Some(ClaudeAccess { level: "write".into(), ask: false })).unwrap();
+        assert_eq!(s.claude_access("db", Some("web")), ClaudeAccess { level: "write".into(), ask: false });
+        s.set_claude_access("db", None).unwrap();
+        assert_eq!(s.claude_access("db", Some("web")).level, "read");
+        assert!(s.set_claude_access("db", Some(ClaudeAccess { level: "admin".into(), ask: true })).is_err());
+        assert!(!s.claude().enabled);
     }
 
     #[test]

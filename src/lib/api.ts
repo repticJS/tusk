@@ -833,6 +833,57 @@ export const rdpApi = {
   close: (sessionId: string) => invoke<void>("rdp_close", { sessionId }).catch(() => {}),
 };
 
+// ---- Claude (MCP) ----
+
+export type ClaudeLevel = "off" | "read" | "write";
+
+export interface ClaudeAccess {
+  level: ClaudeLevel;
+  /** Ask before every change (write access). */
+  ask: boolean;
+}
+
+export interface ClaudeApproval {
+  id: string;
+  client: string;
+  tool: string;
+  target: string;
+  title: string;
+  detail: string;
+  at: number;
+}
+
+export interface ClaudeActivity {
+  id: number;
+  at: number;
+  client: string;
+  tool: string;
+  target: string;
+  detail: string;
+  outcome: "ok" | "error" | "denied";
+  summary: string;
+}
+
+export interface ClaudeState {
+  enabled: boolean;
+  /** Own settings by item id (connections, hosts, sites, folders). */
+  access: Record<string, ClaudeAccess>;
+  running: boolean;
+  clients: string[];
+  pending: ClaudeApproval[];
+  activity: ClaudeActivity[];
+  setup: { desktopInstalled: boolean; codeCommand: string; exe: string };
+}
+
+export const claudeApi = {
+  state: () => call<ClaudeState>("claude_state"),
+  setEnabled: (on: boolean) => call<void>("claude_set_enabled", { on }),
+  setAccess: (id: string, access: ClaudeAccess | null) => call<void>("claude_set_access", { id, access }),
+  decide: (id: string, decision: "allow" | "session" | "deny") => call<void>("claude_decide", { id, decision }),
+  clearActivity: () => call<void>("claude_clear_activity"),
+  installDesktop: () => call<string[]>("claude_install_desktop"),
+};
+
 /** Joins a remote POSIX directory and name. */
 export const remoteJoin = (dir: string, name: string) => (dir.endsWith("/") ? dir + name : `${dir}/${name}`);
 export const remoteParent = (path: string) => {
