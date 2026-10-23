@@ -37,6 +37,7 @@ import { FtpDialog } from "./components/FtpDialog";
 import { RdpDialog } from "./components/RdpDialog";
 import { RdpTab } from "./components/RdpTab";
 import { ClaudeAccessDialog, ClaudeApprovalDialog, ClaudeLivePanel, ClaudeTab } from "./components/Claude";
+import { ClaudeTermTab } from "./components/ClaudeTerminal";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TerminalTab } from "./components/TerminalTab";
 import { TunnelDialog, TunnelsTab } from "./components/TunnelsTab";
@@ -225,6 +226,8 @@ export default function App() {
                     <RdpTab tab={t} active={t.id === activeTabId} />
                   ) : t.kind === "claude" ? (
                     <ClaudeTab tab={t} active={t.id === activeTabId} />
+                  ) : t.kind === "claudeterm" ? (
+                    <ClaudeTermTab tab={t} active={t.id === activeTabId} />
                   ) : (
                     <RemoteFileTab tab={t} active={t.id === activeTabId} />
                   )}
@@ -293,6 +296,8 @@ function TabBar() {
               ? undefined
               : t.kind === "rdp"
                 ? rdpConnections.find((r) => r.id === t.connId)
+              : t.kind === "claudeterm"
+                ? [...sshHosts, ...ftpSites, ...connections].find((x) => x.id === t.targetId)
               : t.kind === "files"
                 ? t.target && (t.target.kind === "ssh" ? sshHosts : ftpSites).find((h) => h.id === t.target!.id)
                 : t.kind === "terminal" || t.kind === "remote"
@@ -332,6 +337,8 @@ function TabBar() {
                         ? `Remote desktop: ${conn?.name ?? ""}`
                       : t.kind === "claude"
                         ? "Claude's access to Tusk"
+                      : t.kind === "claudeterm"
+                        ? `What Claude runs on ${conn?.name ?? ""}`
                       : t.kind === "commands" || t.kind === "run"
                         ? t.title
                   : t.kind === "local"
@@ -371,7 +378,7 @@ function TabBar() {
                   <FolderSync size={13} />
                 ) : t.kind === "rdp" ? (
                   <ScreenShare size={13} />
-                ) : t.kind === "claude" ? (
+                ) : t.kind === "claude" || t.kind === "claudeterm" ? (
                   <Bot size={13} />
                 ) : (
                   <FileCode2 size={13} />

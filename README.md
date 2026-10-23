@@ -150,6 +150,8 @@ Claude refers to connections by name; passwords and keys stay in Tusk.
 
 **Watch Claude work:** a side panel opens when Claude starts something (or click **Claude** in the status bar). Each step shows up as it happens: what Claude asked for (the SQL, command or file), command output as it runs, what Claude got back and how long it took. **Open in query editor**, **Open terminal** and **Browse files** take you to the same place in Tusk. The same list is in the Claude tab.
 
+**In a terminal:** the first time Claude works on a server or database, a **Claude · name** tab opens and shows it like a terminal session: each command or query is typed at a `claude` prompt and its output scrolls in as it runs. Press **Ctrl+C** there (or **Stop**) to stop what Claude is running; the command is hung up on the server, a query is cancelled, and Claude is told you stopped it. Turn the tab off at the bottom of the side panel.
+
 ### Shortcuts
 
 | Keys | Action |

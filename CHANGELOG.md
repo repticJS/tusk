@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.0
+
+- Watch Claude in a terminal: when Claude works on a server or database, a "Claude · name" tab shows each command or query being typed at a prompt, with the output scrolling in as it runs.
+- Stop Claude: press Ctrl+C in that terminal, or Stop in the side panel. Server commands are hung up, queries are cancelled, and Claude is told you stopped it.
+- "Watch in terminal" on any step in the side panel, and a setting to turn the automatic terminal tab off.
+
 ## 0.15.0
 
 - Watch Claude work: a side panel shows each thing Claude does in Tusk as it happens, opening on its own when Claude starts (or click Claude in the status bar).

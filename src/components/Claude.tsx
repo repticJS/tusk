@@ -11,6 +11,7 @@ import {
   Server,
   Settings,
   ShieldAlert,
+  Square,
   SquareTerminal,
   TerminalSquare,
   Trash2,
@@ -208,6 +209,9 @@ function OpenInTusk({ a }: { a: ClaudeActivity }) {
       run: () => void st.openQueryTab(a.targetId, a.database || conn?.database || "postgres", sql || undefined),
     });
   }
+  if (a.targetKind) {
+    buttons.push({ label: "Watch in terminal", icon: <Bot size={11} />, run: () => st.openClaudeTerm(a.targetKind as "server", a.targetId) });
+  }
   if (a.targetKind === "server") {
     buttons.push({ label: "Open terminal", icon: <SquareTerminal size={11} />, run: () => st.openTerminalTab(a.targetId) });
   }
@@ -246,7 +250,9 @@ function ActivityRow({ a, autoOpen = false }: { a: ClaudeActivity; autoOpen?: bo
           ? { text: "done", cls: "text-ok" }
           : a.outcome === "denied"
             ? { text: "declined", cls: "text-warn" }
-            : { text: "failed", cls: "text-danger" };
+            : a.outcome === "stopped"
+              ? { text: "stopped", cls: "text-warn" }
+              : { text: "failed", cls: "text-danger" };
   return (
     <div className="border-b border-border last:border-0" data-activity={a.tool} data-outcome={a.outcome}>
       <button
@@ -267,6 +273,20 @@ function ActivityRow({ a, autoOpen = false }: { a: ClaudeActivity; autoOpen?: bo
           {a.detail && <div className="truncate font-mono text-[11px] text-faint">{a.detail}</div>}
           {!open && (a.outcome === "error" || a.outcome === "denied") && <div className="truncate text-[11px] text-muted">{a.summary}</div>}
         </div>
+        {running && (
+          <span
+            role="button"
+            tabIndex={0}
+            className="btn mt-px h-5 shrink-0 px-1.5 text-[11px] text-danger"
+            title="Stop what Claude is running"
+            onClick={(e) => {
+              e.stopPropagation();
+              void claudeApi.stop(a.id);
+            }}
+          >
+            <Square size={9} /> Stop
+          </span>
+        )}
         <span className="shrink-0 text-right text-[11px] text-faint">
           {a.client} · {running ? took(elapsed * 1000) : ago(a.at)}
           {!running && a.ms > 0 && <div>took {took(a.ms)}</div>}
@@ -301,6 +321,7 @@ export function ClaudeLivePanel() {
       clients: s.claude?.clients.join(", ") ?? "",
       activity: s.claude?.activity,
       follow: s.claudeFollow,
+      term: s.claudeTerm,
     })),
   );
   if (!open) return null;
@@ -344,10 +365,16 @@ export function ClaudeLivePanel() {
           items.slice(0, 100).map((a, i) => <ActivityRow key={a.id} a={a} autoOpen={i === 0} />)
         )}
       </div>
-      <label className="flex items-center gap-1.5 border-t border-border px-3 py-1.5 text-[11.5px] text-muted">
-        <input type="checkbox" checked={c.follow} onChange={(e) => st.setClaudeFollow(e.target.checked)} />
-        Open this panel when Claude starts something
-      </label>
+      <div className="flex flex-col gap-1 border-t border-border px-3 py-1.5 text-[11.5px] text-muted">
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={c.follow} onChange={(e) => st.setClaudeFollow(e.target.checked)} />
+          Open this panel when Claude starts something
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={c.term} onChange={(e) => st.setClaudeTerm(e.target.checked)} />
+          Show Claude's commands in a terminal tab
+        </label>
+      </div>
     </aside>
   );
 }

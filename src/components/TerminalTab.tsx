@@ -20,7 +20,7 @@ import { DropdownButton, Spinner } from "./ui";
 
 type ConnState = "connecting" | "connected" | "closed";
 
-const DARK: ITheme = {
+export const DARK: ITheme = {
   background: "#0e1014",
   foreground: "#d8dce3",
   cursor: "#5b8cff",
@@ -44,7 +44,7 @@ const DARK: ITheme = {
   brightWhite: "#ffffff",
 };
 
-const LIGHT: ITheme = {
+export const LIGHT: ITheme = {
   background: "#f6f7f9",
   foreground: "#1c2027",
   cursor: "#3a6df0",

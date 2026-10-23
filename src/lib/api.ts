@@ -864,7 +864,7 @@ export interface ClaudeActivity {
   database: string;
   detail: string;
   /** "waiting" is waiting for the user's OK. */
-  outcome: "running" | "waiting" | "ok" | "error" | "denied";
+  outcome: "running" | "waiting" | "ok" | "error" | "denied" | "stopped";
   summary: string;
   /** The whole request: SQL, command, path… */
   input: string;
@@ -898,6 +898,8 @@ export const claudeApi = {
   setAccess: (id: string, access: ClaudeAccess | null) => call<void>("claude_set_access", { id, access }),
   decide: (id: string, decision: "allow" | "session" | "deny") => call<void>("claude_decide", { id, decision }),
   clearActivity: () => call<void>("claude_clear_activity"),
+  /** Stop something Claude is running. */
+  stop: (id: number) => call<void>("claude_stop", { id }),
   installDesktop: () => call<string[]>("claude_install_desktop"),
 };
 

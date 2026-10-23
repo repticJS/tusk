@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 /// Longest tool result handed to Claude.
@@ -223,6 +223,8 @@ pub struct Mcp {
     activity: Mutex<VecDeque<Activity>>,
     /// Connected Claude clients by connection number.
     clients: Mutex<HashMap<u64, String>>,
+    /// Stop switches for tool calls that are running, by activity id.
+    stops: Mutex<HashMap<u64, watch::Sender<bool>>>,
     /// "connection|tool|target" the user allowed for the rest of a session.
     allowed: Mutex<HashSet<String>>,
     seq: AtomicU64,
@@ -251,6 +253,13 @@ impl Mcp {
 
     pub fn clear_activity(&self) {
         self.activity.lock().unwrap().retain(|e| e.outcome == "running" || e.outcome == "waiting");
+    }
+
+    /// The user stopped a tool call in Tusk.
+    pub fn stop_call(&self, id: u64) {
+        if let Some(tx) = self.stops.lock().unwrap().get(&id) {
+            let _ = tx.send(true);
+        }
     }
 
     /// The user's answer to an approval: allow | session | deny.
@@ -437,7 +446,7 @@ async fn handle(app: &tauri::AppHandle, conn: u64, client: &str, msg: &Value) ->
         "tools/call" => {
             let name = msg["params"]["name"].as_str().unwrap_or("").to_string();
             let args = msg["params"]["arguments"].clone();
-            let ctx = Ctx { app: app.clone(), conn, client: client.to_string(), act: 0 };
+            let ctx = Ctx { app: app.clone(), conn, client: client.to_string(), act: 0, stop: watch::channel(false).1 };
             let (text, is_error) = match call(&ctx, &name, &args).await {
                 Ok(t) => (t, false),
                 Err(e) => (e, true),
@@ -583,7 +592,24 @@ struct Ctx {
     client: String,
     /// The activity entry of the tool call being run (0 when none).
     act: u64,
+    /// Turns true when the user stops this call in Tusk.
+    stop: watch::Receiver<bool>,
 }
+
+impl Ctx {
+    fn stopped(&self) -> bool {
+        *self.stop.borrow()
+    }
+}
+
+/// Resolves once the user stops the call (never, if it can't be stopped any more).
+async fn stop_signal(mut rx: watch::Receiver<bool>) {
+    if rx.wait_for(|s| *s).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+const STOPPED: &str = "The user stopped this in Tusk. Don't run it again unless they ask.";
 
 impl Ctx {
     fn state(&self) -> tauri::State<'_, AppState> {
@@ -693,10 +719,23 @@ async fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<String, String> {
             ms: 0,
         },
     );
-    let ctx = Ctx { act, ..ctx.clone() };
+    let (stop_tx, stop_rx) = watch::channel(false);
+    mcp.stops.lock().unwrap().insert(act, stop_tx);
+    let ctx = Ctx { act, stop: stop_rx.clone(), ..ctx.clone() };
     let started = std::time::Instant::now();
-    let result = run_tool(&ctx, name, args).await;
+    let result = tokio::select! {
+        r = run_tool(&ctx, name, args) => r,
+        // Commands and queries end themselves when stopped; anything else gets a moment, then is dropped.
+        _ = async {
+            stop_signal(stop_rx).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        } => Err(STOPPED.into()),
+    };
+    let mcp = &ctx.state().mcp;
+    mcp.stops.lock().unwrap().remove(&act);
+    let result = if ctx.stopped() && result.is_err() { Err(STOPPED.to_string()) } else { result };
     let (outcome, summary) = match &result {
+        Err(e) if e == STOPPED => ("stopped", "Stopped in Tusk".to_string()),
         Ok(text) => ("ok", short(text.lines().last().unwrap_or(""), 160)),
         Err(e) if e.starts_with(DECLINED) => ("denied", "Declined in Tusk".to_string()),
         Err(e) => ("error", short(e, 200)),
@@ -762,7 +801,10 @@ async fn approve(ctx: &Ctx, t: &Target, tool: &str, title: String, detail: Strin
     let _ = ctx.app.emit("claude-approval", &req);
     let _ = ctx.app.emit("claude-changed", ());
     get_attention(&ctx.app, &req);
-    let decision = tokio::time::timeout(APPROVAL_WAIT, rx).await;
+    let decision = tokio::select! {
+        d = tokio::time::timeout(APPROVAL_WAIT, rx) => d,
+        _ = stop_signal(ctx.stop.clone()) => Ok(Ok("deny".to_string())),
+    };
     mcp.approvals.lock().unwrap().remove(&id);
     mcp.update(&ctx.app, ctx.act, |e| e.outcome = "running".into());
     let _ = ctx.app.emit("claude-changed", ());
@@ -945,7 +987,32 @@ fn lit(s: &str) -> String {
 
 async fn read_query(ctx: &Ctx, t: &Target, database: Option<&str>, sql: &str, max_rows: usize) -> Result<String, String> {
     let session = db_session(ctx, t, database).await?;
-    session.run_guarded(sql, max_rows, true, 60).await.map(|r| table_text(&r)).map_err(|e| friendly(e, &t.name))
+    guarded(ctx, t, &session, sql, max_rows, true, 60).await
+}
+
+/// Runs one statement, cancelling it on the server if the user stops it.
+async fn guarded(
+    ctx: &Ctx,
+    t: &Target,
+    session: &Arc<crate::db::Session>,
+    sql: &str,
+    max_rows: usize,
+    read_only: bool,
+    timeout_secs: u32,
+) -> Result<String, String> {
+    let forward = {
+        let (stop, session) = (ctx.stop.clone(), session.clone());
+        tokio::spawn(async move {
+            stop_signal(stop).await;
+            let _ = session.cancel().await;
+        })
+    };
+    let r = session.run_guarded(sql, max_rows, read_only, timeout_secs).await;
+    forward.abort();
+    if ctx.stopped() {
+        return Err(STOPPED.into());
+    }
+    r.map(|r| table_text(&r)).map_err(|e| friendly(e, &t.name))
 }
 
 async fn db_tables(ctx: &Ctx, args: &Value) -> Result<String, String> {
@@ -1015,7 +1082,7 @@ async fn db_execute(ctx: &Ctx, args: &Value) -> Result<String, String> {
     };
     approve(ctx, &t, "db_execute", title, sql.to_string()).await?;
     let session = db_session(ctx, &t, db).await?;
-    session.run_guarded(sql, 200, false, 300).await.map(|r| table_text(&r)).map_err(|e| friendly(e, &t.name))
+    guarded(ctx, &t, &session, sql, 200, false, 300).await
 }
 
 async fn db_activity(ctx: &Ctx, args: &Value) -> Result<String, String> {
@@ -1056,7 +1123,19 @@ async fn exec(ctx: &Ctx, t: &Target, script: &str, timeout: Duration, live: bool
             }
         }
     });
-    let status = match tokio::time::timeout(timeout, run).await {
+    let forward = {
+        let (stop, cancel) = (ctx.stop.clone(), cancel.clone());
+        tokio::spawn(async move {
+            stop_signal(stop).await;
+            cancel.notify_one();
+        })
+    };
+    let finished = tokio::time::timeout(timeout, run).await;
+    forward.abort();
+    if ctx.stopped() {
+        return Err(STOPPED.into());
+    }
+    let status = match finished {
         Ok(r) => r.map_err(|e| friendly(e, &t.name))?,
         Err(_) => {
             cancel.notify_one();

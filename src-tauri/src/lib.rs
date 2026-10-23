@@ -1130,6 +1130,11 @@ fn claude_decide(state: State<'_, AppState>, id: String, decision: String) {
 }
 
 #[tauri::command]
+fn claude_stop(state: State<'_, AppState>, id: u64) {
+    state.mcp.stop_call(id);
+}
+
+#[tauri::command]
 fn claude_clear_activity(app: tauri::AppHandle, state: State<'_, AppState>) {
     state.mcp.clear_activity();
     let _ = app.emit("claude-changed", ());
@@ -1433,6 +1438,7 @@ pub fn run() {
             claude_set_access,
             claude_decide,
             claude_clear_activity,
+            claude_stop,
             claude_install_desktop,
             save_rdp,
             delete_rdp,

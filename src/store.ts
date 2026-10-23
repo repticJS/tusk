@@ -177,6 +177,15 @@ export interface ClaudeTab {
   title: string;
 }
 
+/** A read-only terminal showing what Claude runs on one server or database. */
+export interface ClaudeTermTab {
+  id: string;
+  kind: "claudeterm";
+  title: string;
+  targetKind: "database" | "server" | "ftp";
+  targetId: string;
+}
+
 /** A remote desktop (RDP) session. */
 export interface RdpTab {
   id: string;
@@ -211,6 +220,7 @@ export type Tab =
   | FilesTab
   | RdpTab
   | ClaudeTab
+  | ClaudeTermTab
   | TunnelsTab
   | DiscoverTab
   | MonitorTab
@@ -335,6 +345,8 @@ interface State {
   claudeLive: boolean;
   /** Open that panel when Claude starts something. */
   claudeFollow: boolean;
+  /** Open a terminal showing Claude's commands when it starts on a server or database. */
+  claudeTerm: boolean;
   /** A remote desktop tab shown full screen (the rest of Tusk hidden). */
   fullScreenTab: string | null;
   tunnelDialog: { open: boolean; editing?: Partial<TunnelConfig> };
@@ -365,6 +377,8 @@ interface State {
   editClaudeAccess(item: State["claudeAccessItem"]): void;
   setClaudeLive(open: boolean): void;
   setClaudeFollow(on: boolean): void;
+  setClaudeTerm(on: boolean): void;
+  openClaudeTerm(targetKind: ClaudeTermTab["targetKind"], targetId: string, activate?: boolean): void;
   /** A tool call started, changed or finished. */
   claudeActivity(entry: ClaudeActivity): void;
   claudeOutput(chunk: ClaudeOutputChunk): void;
@@ -535,6 +549,7 @@ export const useApp = create<State>()(
       claudeAccessItem: null,
       claudeLive: false,
       claudeFollow: true,
+      claudeTerm: true,
       fullScreenTab: null,
       tunnelDialog: { open: false },
       shareFolderId: null,
@@ -576,6 +591,8 @@ export const useApp = create<State>()(
               ? !t.target || ids.has(t.target.id)
               : t.kind === "rdp"
                 ? ids.has(t.connId)
+                : t.kind === "claudeterm"
+                  ? ids.has(t.targetId)
                 : t.kind === "claude" ||
                   t.kind === "tunnels" ||
                 t.kind === "discover" ||
@@ -666,6 +683,18 @@ export const useApp = create<State>()(
       editClaudeAccess: (claudeAccessItem) => set({ claudeAccessItem }),
       setClaudeLive: (claudeLive) => set({ claudeLive }),
       setClaudeFollow: (claudeFollow) => set({ claudeFollow }),
+      setClaudeTerm: (claudeTerm) => set({ claudeTerm }),
+
+      openClaudeTerm(targetKind, targetId, activate = true) {
+        const existing = get().tabs.find((t) => t.kind === "claudeterm" && t.targetId === targetId);
+        if (existing) return activate ? set({ activeTabId: existing.id }) : undefined;
+        const s = get();
+        const name =
+          (targetKind === "database" ? s.connections : targetKind === "server" ? s.sshHosts : s.ftpSites).find((x) => x.id === targetId)?.name;
+        if (!name) return;
+        const tab: ClaudeTermTab = { id: uid(), kind: "claudeterm", title: `Claude · ${name}`, targetKind, targetId };
+        set((st) => ({ tabs: [...st.tabs, tab], activeTabId: activate ? tab.id : st.activeTabId }));
+      },
 
       claudeActivity(entry) {
         const c = get().claude;
@@ -674,6 +703,11 @@ export const useApp = create<State>()(
         const activity = known ? c.activity.map((a) => (a.id === entry.id ? entry : a)) : [entry, ...c.activity].slice(0, 200);
         set({ claude: { ...c, activity } });
         if (!known && get().claudeFollow) set({ claudeLive: true });
+        // Show Claude's commands in a terminal the first time it works on something.
+        const watching = get().tabs.some((t) => t.kind === "claudeterm" && t.targetId === entry.targetId);
+        if (!known && !watching && get().claudeTerm && entry.targetKind && entry.targetId) {
+          get().openClaudeTerm(entry.targetKind, entry.targetId);
+        }
       },
 
       claudeOutput({ id, text, len }) {
@@ -1446,6 +1480,7 @@ export const useApp = create<State>()(
         statsBar: s.statsBar,
         collapsedFolders: s.collapsedFolders,
         claudeFollow: s.claudeFollow,
+        claudeTerm: s.claudeTerm,
         // SSH sessions don't survive a restart, so their tabs aren't restored.
         tabs: s.tabs.filter((t) => isDbTab(t)),
         activeTabId: isDbTab(s.tabs.find((t) => t.id === s.activeTabId)) ? s.activeTabId : null,
