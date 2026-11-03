@@ -1,6 +1,8 @@
-import { ChevronDown, Keyboard, Maximize, Minimize, MonitorX, Pencil, RotateCw, ScreenShare } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Bot, ChevronDown, ExternalLink, Hand, Keyboard, Maximize, Minimize, MonitorX, Pencil, PanelTopClose, Play, RotateCw, ScreenShare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { DbError, rdpApi, type RdpEvent, type RdpInput } from "../lib/api";
+import { claudeApi, DbError, rdpApi, type RdpEvent, type RdpInput } from "../lib/api";
 import { useApp, type RdpTab as RdpTabModel } from "../store";
 import { DropdownButton, Spinner } from "./ui";
 
@@ -65,10 +67,78 @@ function cursorCss(view: DataView, buf: ArrayBuffer): string {
   return `url(${c.toDataURL()}) ${Math.min(hx, w - 1)} ${Math.min(hy, h - 1)}, default`;
 }
 
-export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
+/** How long after Claude's last action its banner stays. */
+const CLAUDE_RECENT_SECS = 30;
+
+/** Claude using this desktop: a note saying so, and a way to take it back. */
+function ClaudeBanner({ connId }: { connId: string }) {
+  // A string, so the selector's result is stable between renders.
+  const last = useApp((s) => {
+    let at = 0;
+    let running = false;
+    for (const a of s.claude?.activity ?? []) {
+      if (a.targetKind !== "rdp" || a.targetId !== connId) continue;
+      at = Math.max(at, a.at + a.ms / 1000);
+      running ||= a.outcome === "running" || a.outcome === "waiting";
+    }
+    return `${running ? 1 : 0}:${at}`;
+  });
+  const paused = useApp((s) => !!s.claude?.rdpPaused?.includes(connId));
+  const [running, at] = [last.startsWith("1"), Number(last.split(":")[1])];
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  const recent = running || now - at < CLAUDE_RECENT_SECS;
+  useEffect(() => {
+    if (!at) return;
+    setNow(Date.now() / 1000);
+    const t = setInterval(() => setNow(Date.now() / 1000), 5000);
+    return () => clearInterval(t);
+  }, [at]);
+  if (!paused && !recent) return null;
+  const setPaused = async (p: boolean) => {
+    await claudeApi.rdpPause(connId, p).catch(() => {});
+    await useApp.getState().loadClaude();
+  };
+  return (
+    <div
+      className="absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-full border border-border bg-panel/95 py-1 pr-1 pl-3 text-[12px] shadow-lg"
+      data-claude-rdp={paused ? "paused" : "active"}
+    >
+      <Bot size={13} className={paused ? "text-faint" : "text-accent"} />
+      {paused ? <span>You took this desktop back from Claude</span> : <span className="flex items-center gap-1.5">Claude is using this desktop{running && <Spinner size={9} />}</span>}
+      {paused ? (
+        <button className="btn h-6 rounded-full px-2.5 text-[11.5px]" onClick={() => void setPaused(false)} title="Claude may use the mouse and keyboard again">
+          <Play size={11} /> Let Claude continue
+        </button>
+      ) : (
+        <button
+          className="btn h-6 rounded-full px-2.5 text-[11.5px]"
+          onClick={() => void setPaused(true)}
+          title="Claude can still look at the screen, but not click or type, until you hand it back"
+        >
+          <Hand size={11} /> Take over
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A remote desktop in a tab, or (`windowed`) in a window of its own: the
+ * session moves there and back without reconnecting.
+ */
+export function RdpTab({ tab, active, windowed = false }: { tab: RdpTabModel; active: boolean; windowed?: boolean }) {
   const conn = useApp((s) => s.rdpConnections.find((r) => r.id === tab.connId));
-  const fullScreen = useApp((s) => s.fullScreenTab === tab.id);
+  const tabFullScreen = useApp((s) => s.fullScreenTab === tab.id);
+  // A window of its own goes full screen by itself (on whichever monitor it's on).
+  const [windowFullScreen, setWindowFullScreen] = useState(false);
+  const fullScreen = windowed ? windowFullScreen : tabFullScreen;
+  // The session is shown in its own window (this is the tab it came from).
+  const [popped, setPopped] = useState(false);
+  const poppedRef = useRef(false);
+  poppedRef.current = popped;
   const [state, setState] = useState<Phase>({ phase: "connecting" });
+  const phaseRef = useRef(state.phase);
+  phaseRef.current = state.phase;
   const [desk, setDesk] = useState<{ width: number; height: number } | null>(null);
   const [cursor, setCursor] = useState("default");
   const [barVisible, setBarVisible] = useState(false);
@@ -173,8 +243,19 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
     [tab.id, tab.connId, measure, onData, onEvent],
   );
 
-  // Connect once the tab has a size; disconnect when it closes.
+  /** Takes the running session's screen to this tab or window. */
+  const attach = useCallback(async () => {
+    const ok = await rdpApi.attach(tab.id, onData, onEvent).catch(() => false);
+    if (!ok) setState({ phase: "closed", message: "The session has ended." });
+  }, [tab.id, onData, onEvent]);
+
+  // A tab connects once it has a size and disconnects when it closes. A
+  // window of its own takes over the tab's session instead.
   useEffect(() => {
+    if (windowed) {
+      void attach();
+      return;
+    }
     const t = setTimeout(() => void connect(), 30);
     if (conn?.fullScreen) useApp.getState().setFullScreenTab(tab.id);
     return () => {
@@ -184,6 +265,32 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The session's own window closed: show it here again.
+  useEffect(() => {
+    if (windowed) return;
+    const un = listen<string>("rdp-docked", (e) => {
+      if (e.payload !== tab.id || !poppedRef.current) return;
+      setPopped(false);
+      void attach();
+    });
+    // Claude wants this desktop while it's disconnected: connect again.
+    const unClaude = listen<string>("claude-open-rdp", (e) => {
+      if (e.payload !== tab.connId || poppedRef.current) return;
+      if (phaseRef.current === "closed" || phaseRef.current === "error") void connect();
+    });
+    return () => {
+      void un.then((f) => f());
+      void unClaude.then((f) => f());
+    };
+  }, [windowed, tab.id, tab.connId, attach, connect]);
+
+  useEffect(() => {
+    if (!windowed) return;
+    void getCurrentWindow()
+      .setFullscreen(windowFullScreen)
+      .catch(() => {});
+  }, [windowed, windowFullScreen]);
+
   // "Fit the tab": follow the tab's size (after the user stops resizing).
   useEffect(() => {
     if (fixed || !boxRef.current) return;
@@ -191,7 +298,7 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
     const ro = new ResizeObserver(() => {
       clearTimeout(timer);
       timer = setTimeout(() => {
-        if (!connectedRef.current || !boxRef.current?.offsetWidth) return;
+        if (!connectedRef.current || poppedRef.current || !boxRef.current?.offsetWidth) return;
         const m = measure();
         const d = deskRef.current;
         if (d && Math.abs(d.width - m.width) < 4 && Math.abs(d.height - m.height) < 4) return;
@@ -207,7 +314,7 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
 
   // Keys and buttons held while the tab loses focus would stay pressed.
   useEffect(() => {
-    if (!active) void rdpApi.release(tab.id);
+    if (!active && !poppedRef.current) void rdpApi.release(tab.id);
   }, [active, tab.id]);
 
   useEffect(() => {
@@ -297,7 +404,23 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
     canvasRef.current?.focus({ preventScroll: true });
   };
 
-  const toggleFullScreen = () => useApp.getState().setFullScreenTab(fullScreen ? null : tab.id);
+  const toggleFullScreen = () =>
+    windowed ? setWindowFullScreen(!windowFullScreen) : useApp.getState().setFullScreenTab(fullScreen ? null : tab.id);
+
+  /** Moves the session to a window of its own, about the size of the remote screen. */
+  const popOut = async () => {
+    const dpr = window.devicePixelRatio || 1;
+    const d = deskRef.current;
+    const width = Math.min((d?.width ?? 1280) / dpr, window.screen.availWidth * 0.9);
+    const height = Math.min((d?.height ?? 800) / dpr + 40, window.screen.availHeight * 0.9);
+    if (tabFullScreen) useApp.getState().setFullScreenTab(null);
+    try {
+      await rdpApi.popout(tab.id, conn?.name ?? tab.title, Math.round(width), Math.round(height));
+      setPopped(true);
+    } catch (e) {
+      useApp.getState().showToast(errText(e), "error");
+    }
+  };
 
   // ---- rendering ----
 
@@ -325,9 +448,25 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
         }
         items={keysMenu}
       />
-      <button className="btn-ghost h-7 px-2" onClick={toggleFullScreen} title={fullScreen ? "Exit full screen" : "Full screen"} aria-label="Toggle full screen">
-        {fullScreen ? <Minimize size={13} /> : <Maximize size={13} />} {fullScreen ? "Exit full screen" : "Full screen"}
-      </button>
+      {windowed ? (
+        <button className="btn-ghost h-7 px-2" onClick={() => void rdpApi.dock(tab.id)} title="Close this window and show the desktop in its Tusk tab again">
+          <PanelTopClose size={13} /> Back to tab
+        </button>
+      ) : (
+        <button
+          className="btn-ghost h-7 px-2"
+          onClick={() => void popOut()}
+          disabled={!connected}
+          title="Open in a window of its own, to move to another monitor or make full screen there"
+        >
+          <ExternalLink size={13} /> Pop out
+        </button>
+      )}
+      {!popped && (
+        <button className="btn-ghost h-7 px-2" onClick={toggleFullScreen} title={fullScreen ? "Exit full screen" : "Full screen"} aria-label="Toggle full screen">
+          {fullScreen ? <Minimize size={13} /> : <Maximize size={13} />} {fullScreen ? "Exit full screen" : "Full screen"}
+        </button>
+      )}
       {connected ? (
         <button className="btn-ghost h-7 px-2" onClick={() => void rdpApi.close(tab.id)} title="Disconnect">
           <MonitorX size={13} /> Disconnect
@@ -378,7 +517,25 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
           onBlur={() => void rdpApi.release(tab.id)}
           aria-label={`Remote desktop ${tab.title}`}
         />
-        {state.phase !== "connected" && (
+        {conn && !popped && <ClaudeBanner connId={conn.id} />}
+        {popped && (
+          <div className="absolute inset-0 flex items-center justify-center bg-bg p-6" data-rdp-popped>
+            <div className="flex max-w-[460px] flex-col items-center gap-3 text-center">
+              <ExternalLink size={22} className="text-faint" />
+              <div className="text-[14px] font-medium">{conn?.name ?? tab.title} is open in its own window</div>
+              <div className="text-[12.5px] text-muted">Move that window to any monitor and make it full screen there. Closing it brings the desktop back here.</div>
+              <div className="flex gap-2">
+                <button className="btn-primary" onClick={() => void popOut()}>
+                  <ExternalLink size={12} /> Show window
+                </button>
+                <button className="btn-outline" onClick={() => void rdpApi.dock(tab.id)}>
+                  <PanelTopClose size={12} /> Back to this tab
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {!popped && state.phase !== "connected" && (
           <div className="absolute inset-0 flex items-center justify-center bg-bg/85 p-6">
             {state.phase === "connecting" ? (
               <div className="flex items-center gap-2 text-[13px] text-muted">
@@ -394,7 +551,7 @@ export function RdpTab({ tab, active }: { tab: RdpTabModel; active: boolean }) {
                   <button className="btn-primary" onClick={() => void connect()}>
                     <RotateCw size={12} /> Reconnect
                   </button>
-                  {conn && (
+                  {conn && !windowed && (
                     <button className="btn-outline" onClick={() => useApp.getState().openRdpDialog(conn)}>
                       <Pencil size={12} /> Edit connection
                     </button>

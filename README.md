@@ -128,6 +128,7 @@ Connect to Windows PCs and servers (and Linux machines running xrdp) inside a Tu
 | Sign-in | User, domain and password saved in Windows Credential Manager (or asked each time), Network Level Authentication, a prompt when the password is wrong |
 | Security | The computer's certificate is checked the first time you connect, like SSH host keys, and you're warned if it changes. The password is only sent after that |
 | Display | Fit the tab (the remote screen follows the tab's size and your display scaling) or a fixed size that shrinks to fit or scrolls; 32- or 16-bit colour; best looking or fastest; full screen with a bar at the top edge |
+| Pop out | **Pop out** moves the desktop to a window of its own without reconnecting: drag it to another monitor and make it full screen there. Close the window (or **Back to tab**) to put it back in its tab |
 | Extras | Sound plays on this PC, clipboard shared both ways (Windows), **Send keys** for Ctrl+Alt+Del, the Windows key, Alt+Tab and others the PC keeps for itself |
 
 Keys typed in a remote desktop go to it, except Ctrl+Shift+W / T / P, which stay with Tusk as in terminals.
@@ -145,8 +146,12 @@ Let Claude, the desktop app or Claude Code, use your databases and servers throu
 | List tables, describe them, run queries, see sessions and locks | Read only. Queries run one statement at a time in a read-only transaction that's always rolled back |
 | Check a server (disks, memory, failed services, PM2 apps, containers), read logs, list and read files | Read only |
 | Change data or schema, run shell commands, write files, run saved commands | Read & write. Tusk asks you first (Deny / Allow once / Allow for this session) unless you untick **Ask before changes** |
+| See a remote desktop's screen | Read only |
+| Click, type, press keys, scroll and drag on a remote desktop | Read & write. One OK with **Allow for this session** covers all of it |
 
 Claude refers to connections by name; passwords and keys stay in Tusk.
+
+**Remote desktops.** When Claude asks for a desktop that isn't open, Tusk opens its tab and connects, so you can watch (if it needs a password or your OK for the certificate, you're asked there). Claude gets a screenshot, scaled to at most 1280×800, after each step. While it works, a note on the desktop says so; **Take over** stops Claude's mouse and keyboard on it (it can still look) until you click **Let Claude continue**.
 
 **Watch Claude work:** a side panel opens when Claude starts something (or click **Claude** in the status bar). Each step shows up as it happens: what Claude asked for (the SQL, command or file), command output as it runs, what Claude got back and how long it took. **Open in query editor**, **Open terminal** and **Browse files** take you to the same place in Tusk. The same list is in the Claude tab.
 

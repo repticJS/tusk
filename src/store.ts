@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
+import { popoutSession } from "./lib/window";
 import {
   api,
   DbError,
@@ -386,7 +387,7 @@ interface State {
   closeRdpDialog(): void;
   deleteRdp(id: string): Promise<void>;
   /** Opens a remote desktop tab (or switches to the open one). */
-  openRdpTab(connId: string): void;
+  openRdpTab(connId: string, activate?: boolean): void;
   setFullScreenTab(id: string | null): void;
   openFtpDialog(editing?: FtpSite): void;
   closeFtpDialog(): void;
@@ -700,12 +701,16 @@ export const useApp = create<State>()(
         const c = get().claude;
         if (!c) return void get().loadClaude();
         const known = c.activity.some((a) => a.id === entry.id);
-        const activity = known ? c.activity.map((a) => (a.id === entry.id ? entry : a)) : [entry, ...c.activity].slice(0, 200);
+        let activity = known ? c.activity.map((a) => (a.id === entry.id ? entry : a)) : [entry, ...c.activity].slice(0, 200);
+        // Screenshots are big: keep the latest few, like the backend does.
+        let images = 0;
+        activity = activity.map((a) => (a.image && ++images > 6 ? { ...a, image: "" } : a));
         set({ claude: { ...c, activity } });
-        if (!known && get().claudeFollow) set({ claudeLive: true });
-        // Show Claude's commands in a terminal the first time it works on something.
+        if (!known && get().claudeFollow && !popoutSession) set({ claudeLive: true });
+        // Show Claude's commands in a terminal the first time it works on something
+        // (a remote desktop shows itself in its own tab instead).
         const watching = get().tabs.some((t) => t.kind === "claudeterm" && t.targetId === entry.targetId);
-        if (!known && !watching && get().claudeTerm && entry.targetKind && entry.targetId) {
+        if (!known && !watching && get().claudeTerm && entry.targetKind && entry.targetKind !== "rdp" && entry.targetId) {
           get().openClaudeTerm(entry.targetKind, entry.targetId);
         }
       },
@@ -735,13 +740,13 @@ export const useApp = create<State>()(
         await get().loadConnections();
       },
 
-      openRdpTab(connId) {
+      openRdpTab(connId, activate = true) {
         const conn = get().rdpConnections.find((r) => r.id === connId);
         if (!conn) return;
         const existing = get().tabs.find((t) => t.kind === "rdp" && t.connId === connId);
-        if (existing) return set({ activeTabId: existing.id });
+        if (existing) return activate ? set({ activeTabId: existing.id }) : undefined;
         const tab: RdpTab = { id: uid(), kind: "rdp", title: conn.name, connId };
-        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
+        set((s) => ({ tabs: [...s.tabs, tab], activeTabId: activate || !s.activeTabId ? tab.id : s.activeTabId }));
       },
 
       setFullScreenTab: (fullScreenTab) => set({ fullScreenTab }),
@@ -1473,6 +1478,17 @@ export const useApp = create<State>()(
     {
       name: "tusk-state",
       version: 1,
+      // A popped-out remote desktop reads the settings but never writes them,
+      // so it can't overwrite the main window's tabs.
+      storage: createJSONStorage(() => ({
+        getItem: (k) => localStorage.getItem(k),
+        setItem: (k, v) => {
+          if (!popoutSession) localStorage.setItem(k, v);
+        },
+        removeItem: (k) => {
+          if (!popoutSession) localStorage.removeItem(k);
+        },
+      })),
       partialize: (s) => ({
         theme: s.theme,
         rowLimit: s.rowLimit,

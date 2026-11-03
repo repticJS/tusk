@@ -105,7 +105,10 @@ export default function App() {
     const unlistenApproval = listen("claude-approval", () => void useApp.getState().loadClaude());
     const unlistenActivity = listen<ClaudeActivity>("claude-activity", (e) => useApp.getState().claudeActivity(e.payload));
     const unlistenOutput = listen<ClaudeOutputChunk>("claude-output", (e) => useApp.getState().claudeOutput(e.payload));
+    // Claude wants a remote desktop that isn't open: open its tab (it connects by itself).
+    const unlistenRdp = listen<string>("claude-open-rdp", (e) => useApp.getState().openRdpTab(e.payload));
     return () => {
+      void unlistenRdp.then((f) => f());
       void unlistenActivity.then((f) => f());
       void unlistenOutput.then((f) => f());
       void unlisten.then((f) => f());

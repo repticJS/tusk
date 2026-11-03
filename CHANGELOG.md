@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.0
+
+- Pop out a remote desktop: **Pop out** in its toolbar moves it to a window of its own without reconnecting, so you can put it on another monitor and make it full screen there. Closing the window (or **Back to tab**) brings it back to its tab.
+- Claude can use remote desktops: give one read-only access to let Claude see the screen, or read & write to let it click, type, press keys, scroll and drag. Claude gets a screenshot after each step.
+- If the desktop isn't open, Tusk opens its tab and connects, so you can watch Claude work. A note on the desktop says when Claude is using it; **Take over** stops its mouse and keyboard until you hand it back.
+- One OK covers all of Claude's clicks and typing on a desktop when you choose "Allow for this session". Claude's screenshots show in the side panel.
+
 ## 0.16.0
 
 - Watch Claude in a terminal: when Claude works on a server or database, a "Claude · name" tab shows each command or query being typed at a prompt, with the output scrolling in as it runs.

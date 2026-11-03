@@ -838,7 +838,12 @@ function RdpNode({
             {isOpen && <span className="absolute -right-0.5 -bottom-0.5 h-1.5 w-1.5 rounded-full bg-ok ring-2 ring-panel" />}
           </span>
         }
-        label={<span className="font-medium">{conn.name}</span>}
+        label={
+          <>
+            <span className="font-medium">{conn.name}</span>
+            <ClaudeMark id={conn.id} folderId={conn.folderId} />
+          </>
+        }
         right={<span className="font-mono">RDP</span>}
         title={`${target}\nClick to connect`}
         onClick={() => !clickSuppressed() && open()}
@@ -853,6 +858,7 @@ function RdpNode({
               onClick: () => useApp.getState().openRdpDialog({ ...conn, id: "", name: `${conn.name} copy` }),
             },
             { label: "Copy address", icon: <Copy size={13} />, onClick: () => void navigator.clipboard.writeText(`${conn.host}:${conn.port}`) },
+            claudeEntry(conn.id, conn.name, conn.folderId),
             {
               label: "Move to…",
               icon: <FolderInput size={13} />,

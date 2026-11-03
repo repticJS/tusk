@@ -32,13 +32,18 @@ const MAX_OUTPUT: usize = 60_000;
 const MAX_SHOWN: usize = 20_000;
 const MAX_LIVE_OUTPUT: usize = 200_000;
 const MAX_ACTIVITY: usize = 200;
+/// Screenshots kept in the activity list.
+const KEEP_IMAGES: usize = 6;
 /// How long an approval waits for the user.
 const APPROVAL_WAIT: Duration = Duration::from_secs(600);
 
 const INSTRUCTIONS: &str = "Tusk is the user's database and server manager. Through it you can use the PostgreSQL \
-databases, SSH servers and FTP sites the user has allowed. Start with list_connections. db_query always runs in a \
-read-only transaction. Tools that change something (db_execute, server_run, files_write, run_saved_command) need \
-write access and usually the user's OK in Tusk, so say what you are about to do and why before calling them.";
+databases, SSH servers, FTP sites and remote desktops (RDP) the user has allowed. Start with list_connections. db_query \
+always runs in a read-only transaction. Tools that change something (db_execute, server_run, files_write, \
+run_saved_command, and the rdp_ tools that click or type) need write access and usually the user's OK in Tusk, so say \
+what you are about to do and why before calling them. On a remote desktop, start with rdp_screenshot; give x and y in \
+the pixels of the latest screenshot. Every rdp_ action returns a new screenshot, so check it before the next step. The \
+user watches the desktop in Tusk and can take it back at any time.";
 
 const OFF_MESSAGE: &str = "Tusk isn't letting Claude in right now. Ask the user to open Tusk, go to the Claude tab \
 (Ctrl+P → Claude) and turn on \"Let Claude use Tusk\", and allow the connections Claude should use.";
@@ -74,6 +79,24 @@ fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
 
 fn text_result(text: String, is_error: bool) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
+}
+
+/// What a tool hands back: text, and a screenshot for remote desktops.
+struct Out {
+    text: String,
+    /// PNG
+    image: Option<Vec<u8>>,
+}
+
+impl From<String> for Out {
+    fn from(text: String) -> Self {
+        Out { text, image: None }
+    }
+}
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 // ---- the bridge Claude starts ----
@@ -206,6 +229,8 @@ pub struct Activity {
     pub output: String,
     /// How long it took, once done.
     pub ms: u64,
+    /// A screenshot Claude got back (PNG, base64), for the latest few only.
+    pub image: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -227,6 +252,8 @@ pub struct Mcp {
     stops: Mutex<HashMap<u64, watch::Sender<bool>>>,
     /// "connection|tool|target" the user allowed for the rest of a session.
     allowed: Mutex<HashSet<String>>,
+    /// Remote desktops the user took back from Claude.
+    rdp_paused: Mutex<HashSet<String>>,
     seq: AtomicU64,
 }
 
@@ -237,6 +264,8 @@ pub struct McpView {
     pub clients: Vec<String>,
     pub pending: Vec<ApprovalRequest>,
     pub activity: Vec<Activity>,
+    /// Remote desktops the user took back from Claude.
+    pub rdp_paused: Vec<String>,
 }
 
 impl Mcp {
@@ -248,6 +277,34 @@ impl Mcp {
             clients,
             pending: self.approvals.lock().unwrap().values().map(|(r, _)| r.clone()).collect(),
             activity: self.activity.lock().unwrap().iter().cloned().collect(),
+            rdp_paused: self.rdp_paused.lock().unwrap().iter().cloned().collect(),
+        }
+    }
+
+    /// The user takes a remote desktop back from Claude, or hands it over again.
+    pub fn set_rdp_paused(&self, conn_id: &str, paused: bool) {
+        let mut p = self.rdp_paused.lock().unwrap();
+        if paused {
+            p.insert(conn_id.to_string());
+        } else {
+            p.remove(conn_id);
+        }
+    }
+
+    fn rdp_is_paused(&self, conn_id: &str) -> bool {
+        self.rdp_paused.lock().unwrap().contains(conn_id)
+    }
+
+    /// Screenshots are big: only the latest few stay in the activity list.
+    fn forget_old_images(&self) {
+        let mut seen = 0;
+        for e in self.activity.lock().unwrap().iter_mut() {
+            if !e.image.is_empty() {
+                seen += 1;
+                if seen > KEEP_IMAGES {
+                    e.image.clear();
+                }
+            }
         }
     }
 
@@ -447,11 +504,20 @@ async fn handle(app: &tauri::AppHandle, conn: u64, client: &str, msg: &Value) ->
             let name = msg["params"]["name"].as_str().unwrap_or("").to_string();
             let args = msg["params"]["arguments"].clone();
             let ctx = Ctx { app: app.clone(), conn, client: client.to_string(), act: 0, stop: watch::channel(false).1 };
-            let (text, is_error) = match call(&ctx, &name, &args).await {
-                Ok(t) => (t, false),
-                Err(e) => (e, true),
-            };
-            reply(id, text_result(cap(text), is_error))
+            match call(&ctx, &name, &args).await {
+                Ok(Out { text, image: Some(png) }) => reply(
+                    id,
+                    json!({
+                        "content": [
+                            { "type": "text", "text": cap(text) },
+                            { "type": "image", "data": b64(&png), "mimeType": "image/png" },
+                        ],
+                        "isError": false,
+                    }),
+                ),
+                Ok(Out { text, image: None }) => reply(id, text_result(cap(text), false)),
+                Err(e) => reply(id, text_result(cap(e), true)),
+            }
         }
         _ => rpc_error(id, -32601, "Method not found"),
     }
@@ -485,6 +551,9 @@ fn tool_defs() -> Vec<Value> {
     let database = json!({ "type": "string", "description": "Database to use instead of the connection's default" });
     let host = json!({ "type": "string", "description": "SSH server name (from list_connections)" });
     let target = json!({ "type": "string", "description": "SSH server or FTP site name (from list_connections)" });
+    let desktop = json!({ "type": "string", "description": "Remote desktop name (from list_connections)" });
+    let px = |what: &str| json!({ "type": "integer", "description": format!("{what}, in pixels of the latest screenshot") });
+    let shot = json!({ "type": "boolean", "description": "Return a screenshot afterwards (default true)" });
     vec![
         tool(
             "list_connections",
@@ -576,6 +645,70 @@ fn tool_defs() -> Vec<Value> {
             false,
         ),
         tool(
+            "rdp_screenshot",
+            "Shows the screen of a remote desktop (Windows, or Linux with xrdp). Tusk connects first if the desktop isn't open yet, in a tab the user can watch.",
+            json!({ "desktop": desktop }),
+            &["desktop"],
+            true,
+        ),
+        tool(
+            "rdp_click",
+            "Clicks on a remote desktop at x, y (pixels of the latest screenshot). Needs write access; returns a new screenshot.",
+            json!({
+                "desktop": desktop,
+                "x": px("Across"),
+                "y": px("Down"),
+                "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "Default left" },
+                "clicks": { "type": "integer", "description": "1 (default), 2 for a double-click, 3 for a triple-click" },
+                "modifiers": { "type": "string", "description": "Keys held while clicking, like \"ctrl\" or \"shift+ctrl\"" },
+                "screenshot": shot,
+            }),
+            &["desktop", "x", "y"],
+            false,
+        ),
+        tool(
+            "rdp_move",
+            "Moves the mouse pointer on a remote desktop without clicking (to hover). Needs write access; returns a new screenshot.",
+            json!({ "desktop": desktop, "x": px("Across"), "y": px("Down"), "screenshot": shot }),
+            &["desktop", "x", "y"],
+            false,
+        ),
+        tool(
+            "rdp_drag",
+            "Drags with the left button held from x, y to to_x, to_y on a remote desktop. Needs write access; returns a new screenshot.",
+            json!({ "desktop": desktop, "x": px("Start across"), "y": px("Start down"), "to_x": px("End across"), "to_y": px("End down"), "screenshot": shot }),
+            &["desktop", "x", "y", "to_x", "to_y"],
+            false,
+        ),
+        tool(
+            "rdp_scroll",
+            "Scrolls the mouse wheel over x, y on a remote desktop. Needs write access; returns a new screenshot.",
+            json!({
+                "desktop": desktop,
+                "x": px("Across"),
+                "y": px("Down"),
+                "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+                "amount": { "type": "integer", "description": "Wheel notches (default 3, at most 25)" },
+                "screenshot": shot,
+            }),
+            &["desktop", "x", "y", "direction"],
+            false,
+        ),
+        tool(
+            "rdp_type",
+            "Types text on a remote desktop where the keyboard focus is (click a field first). New lines press Enter. Needs write access; returns a new screenshot.",
+            json!({ "desktop": desktop, "text": { "type": "string" }, "screenshot": shot }),
+            &["desktop", "text"],
+            false,
+        ),
+        tool(
+            "rdp_key",
+            "Presses keys on a remote desktop: one combination like \"ctrl+c\", \"alt+f4\", \"win+r\", \"ctrl+alt+del\", or several separated by spaces (\"ctrl+a delete\"). Names: ctrl, alt, shift, win, enter, esc, tab, backspace, delete, home, end, pageup, pagedown, up, down, left, right, space, f1–f24, letters and digits. Needs write access; returns a new screenshot.",
+            json!({ "desktop": desktop, "keys": { "type": "string" }, "screenshot": shot }),
+            &["desktop", "keys"],
+            false,
+        ),
+        tool(
             "run_saved_command",
             "Runs one of the user's saved commands (deploys, restarts…) on its servers and returns each server's output. Needs write access to all of them; the user is usually asked first.",
             json!({ "name": { "type": "string", "description": "Saved command name (from list_connections)" } }),
@@ -644,6 +777,11 @@ fn targets(state: &AppState) -> Vec<Target> {
         let access = store.claude_access(&f.id, f.folder_id.as_deref());
         out.push(Target { kind: "ftp", detail: format!("{}://{}@{}:{}", f.protocol, f.user, f.host, f.port), id: f.id, name: f.name, access });
     }
+    for r in store.list_rdp() {
+        let access = store.claude_access(&r.id, r.folder_id.as_deref());
+        let user = if r.user.is_empty() { String::new() } else if r.domain.is_empty() { format!("{}@", r.user) } else { format!("{}\\{}@", r.domain, r.user) };
+        out.push(Target { kind: "rdp", detail: format!("RDP {user}{}:{}", r.host, r.port), id: r.id, name: r.name, access });
+    }
     out.retain(|t| t.access.level != "off");
     out
 }
@@ -656,7 +794,7 @@ fn find(state: &AppState, kinds: &[&str], name: &str) -> Result<Target, String> 
         [t] => Ok((*t).clone()),
         [] => Err(format!(
             "There's no {} named \"{n}\" that Claude may use. Call list_connections to see them; the user can allow more in Tusk → Claude.",
-            kinds.join(" or ").replace("server", "SSH server").replace("ftp", "FTP site")
+            kinds.join(" or ").replace("server", "SSH server").replace("ftp", "FTP site").replace("rdp", "remote desktop")
         )),
         _ => Err(format!("Several are named \"{n}\"; use one of these ids: {}", hits.iter().map(|t| t.id.as_str()).collect::<Vec<_>>().join(", "))),
     }
@@ -688,12 +826,18 @@ fn short(s: &str, n: usize) -> String {
 }
 
 /// Runs a tool and records it in the activity list as it happens.
-async fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<String, String> {
-    let named = ["connection", "host", "target"].iter().find_map(|k| opt(args, k)).unwrap_or("");
+async fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<Out, String> {
+    let named = ["connection", "host", "target", "desktop"].iter().find_map(|k| opt(args, k)).unwrap_or("");
     let found = if named.is_empty() { None } else { resolve(&ctx.state(), named) };
     let target = found.as_ref().map(|t| t.name.clone()).unwrap_or_else(|| opt(args, "name").unwrap_or(named).to_string());
-    let detail = ["sql", "command", "path", "table", "source"].iter().find_map(|k| opt(args, k)).map(|s| short(s, 300)).unwrap_or_default();
+    let rdp_action = name.starts_with("rdp_").then(|| rdp_describe(name, args));
+    let detail = match &rdp_action {
+        Some(d) => short(d, 300),
+        None => ["sql", "command", "path", "table", "source"].iter().find_map(|k| opt(args, k)).map(|s| short(s, 300)).unwrap_or_default(),
+    };
     let input = match name {
+        "rdp_type" => args["text"].as_str().unwrap_or("").to_string(),
+        _ if rdp_action.is_some() => rdp_action.clone().unwrap_or_default(),
         "files_write" => format!("{}\n\n{}", opt(args, "path").unwrap_or(""), args["content"].as_str().unwrap_or("")),
         "server_logs" => [opt(args, "source"), opt(args, "name")].into_iter().flatten().collect::<Vec<_>>().join(" "),
         _ => ["sql", "command", "path", "table", "name"].iter().find_map(|k| opt(args, k)).unwrap_or("").to_string(),
@@ -717,6 +861,7 @@ async fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<String, String> {
             result: String::new(),
             output: String::new(),
             ms: 0,
+            image: String::new(),
         },
     );
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -736,20 +881,28 @@ async fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<String, String> {
     let result = if ctx.stopped() && result.is_err() { Err(STOPPED.to_string()) } else { result };
     let (outcome, summary) = match &result {
         Err(e) if e == STOPPED => ("stopped", "Stopped in Tusk".to_string()),
-        Ok(text) => ("ok", short(text.lines().last().unwrap_or(""), 160)),
+        Ok(out) => ("ok", short(out.text.lines().last().unwrap_or(""), 160)),
         Err(e) if e.starts_with(DECLINED) => ("denied", "Declined in Tusk".to_string()),
         Err(e) => ("error", short(e, 200)),
     };
     let shown = clip(match &result {
-        Ok(t) | Err(t) => t.clone(),
+        Ok(o) => o.text.clone(),
+        Err(t) => t.clone(),
     }, MAX_SHOWN);
-    ctx.state().mcp.update(&ctx.app, act, |e| {
+    let image = match &result {
+        Ok(Out { image: Some(png), .. }) => b64(png),
+        _ => String::new(),
+    };
+    let mcp = &ctx.state().mcp;
+    mcp.update(&ctx.app, act, |e| {
         e.outcome = outcome.into();
         e.summary = summary;
         e.result = shown;
         e.output.clear();
         e.ms = started.elapsed().as_millis() as u64;
+        e.image = image;
     });
+    mcp.forget_old_images();
     result
 }
 
@@ -835,7 +988,14 @@ fn get_attention(app: &tauri::AppHandle, req: &ApprovalRequest) {
         .show();
 }
 
-async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<String, String> {
+async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<Out, String> {
+    if name.starts_with("rdp_") {
+        return rdp_tool(ctx, name, args).await;
+    }
+    text_tool(ctx, name, args).await.map(Out::from)
+}
+
+async fn text_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<String, String> {
     match name {
         "list_connections" => Ok(list_connections(&ctx.state())),
         "db_tables" => db_tables(ctx, args).await,
@@ -868,7 +1028,7 @@ fn list_connections(state: &AppState) -> String {
         return "The user hasn't allowed Claude to use any connections yet. They can do it in Tusk → Claude.".into();
     }
     let mut out = String::new();
-    for (kind, title) in [("database", "Databases"), ("server", "SSH servers"), ("ftp", "FTP sites")] {
+    for (kind, title) in [("database", "Databases"), ("server", "SSH servers"), ("ftp", "FTP sites"), ("rdp", "Remote desktops (rdp_screenshot, rdp_click…)")] {
         let list: Vec<&Target> = all.iter().filter(|t| t.kind == kind).collect();
         if list.is_empty() {
             continue;
@@ -1308,6 +1468,245 @@ async fn files_write(ctx: &Ctx, args: &Value) -> Result<String, String> {
     Ok(format!("Wrote {} bytes to {path}", content.len()))
 }
 
+// ---- remote desktops ----
+
+/// Screenshots fit within this (and Claude's coordinates are in their pixels).
+const SHOT_W: u32 = 1280;
+const SHOT_H: u32 = 800;
+/// How long the screen gets to change after an action before the screenshot.
+const SETTLE: Duration = Duration::from_millis(700);
+const MAX_TYPED: usize = 5000;
+
+fn paused_message(name: &str) -> String {
+    format!(
+        "The user has taken {name} back in Tusk, so Claude can't use the mouse or keyboard there right now. \
+         Ask them to hand it back (\"Let Claude continue\" in its tab) before trying again."
+    )
+}
+
+/// What an rdp_ call does, in words (for the user's OK and the activity list).
+fn rdp_describe(name: &str, args: &Value) -> String {
+    let n = |k: &str| args[k].as_f64().map(|v| format!("{}", v.round() as i64)).unwrap_or_else(|| "?".into());
+    let at = format!("{}, {}", n("x"), n("y"));
+    match name {
+        "rdp_screenshot" => "Look at the screen".into(),
+        "rdp_click" => {
+            let verb = match (args["clicks"].as_u64().unwrap_or(1), opt(args, "button").unwrap_or("left")) {
+                (2, "left") => "Double-click".to_string(),
+                (3, "left") => "Triple-click".to_string(),
+                (1, "left") => "Click".to_string(),
+                (1, b) => format!("{}{}-click", b[..1].to_uppercase(), &b[1..]),
+                (c, b) => format!("{c}× {b}-click"),
+            };
+            match opt(args, "modifiers") {
+                Some(m) => format!("{m}+{} at {at}", verb.to_lowercase()),
+                None => format!("{verb} at {at}"),
+            }
+        }
+        "rdp_move" => format!("Move the pointer to {at}"),
+        "rdp_drag" => format!("Drag from {at} to {}, {}", n("to_x"), n("to_y")),
+        "rdp_scroll" => format!("Scroll {} {} at {at}", opt(args, "direction").unwrap_or("down"), args["amount"].as_u64().unwrap_or(3)),
+        "rdp_type" => format!("Type \"{}\"", short(args["text"].as_str().unwrap_or(""), 200)),
+        "rdp_key" => format!("Press {}", opt(args, "keys").unwrap_or("")),
+        other => other.to_string(),
+    }
+}
+
+/// The session showing a remote desktop. When none is open, Tusk opens its
+/// tab (where the user can answer password and certificate questions) and
+/// waits for it to connect.
+async fn desktop_session(ctx: &Ctx, t: &Target) -> Result<String, String> {
+    let rdp = ctx.state().rdp.clone();
+    if let Some(id) = rdp.session_for(&t.id) {
+        return Ok(id);
+    }
+    let _ = ctx.app.emit_to("main", "claude-open-rdp", &t.id);
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        if ctx.stopped() {
+            return Err(STOPPED.into());
+        }
+        if let Some(id) = rdp.session_for(&t.id) {
+            // Give the desktop a moment to draw itself.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            return Ok(id);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(format!(
+                "Tusk couldn't connect to {} within 2 minutes. Ask the user to look at its tab in Tusk (it may need a password or their OK for the computer's certificate).",
+                t.name
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+async fn screenshot(ctx: &Ctx, t: &Target, session: &str) -> Result<Out, String> {
+    let rdp = ctx.state().rdp.clone();
+    let f = rdp.capture(session).await.ok_or_else(|| format!("{} isn't connected any more.", t.name))?;
+    let (w, h) = (f.width, f.height);
+    let (sw, sh) = crate::rdp::shot_size(w, h, SHOT_W, SHOT_H);
+    let png = tokio::task::spawn_blocking(move || crate::rdp::screenshot_png(&f, sw, sh)).await.map_err(|e| e.to_string())??;
+    let text = if (sw, sh) == (u32::from(w), u32::from(h)) {
+        format!("Screen of {} ({w}×{h}).", t.name)
+    } else {
+        format!("Screen of {}, shown at {sw}×{sh} (the desktop itself is {w}×{h}). Coordinates are in this screenshot's pixels.", t.name)
+    };
+    Ok(Out { text, image: Some(png) })
+}
+
+/// A point in screenshot pixels → the desktop's own pixels.
+fn desk_point(size: (u16, u16), x: f64, y: f64) -> Result<(u16, u16), String> {
+    let (w, h) = size;
+    let (sw, sh) = crate::rdp::shot_size(w, h, SHOT_W, SHOT_H);
+    if !(0.0..=f64::from(sw)).contains(&x) || !(0.0..=f64::from(sh)).contains(&y) {
+        return Err(format!("{x}, {y} is off the screen; the screenshot is {sw}×{sh}"));
+    }
+    let px = (x * f64::from(w) / f64::from(sw)).round().clamp(0.0, f64::from(w.saturating_sub(1)));
+    let py = (y * f64::from(h) / f64::from(sh)).round().clamp(0.0, f64::from(h.saturating_sub(1)));
+    Ok((px as u16, py as u16))
+}
+
+fn point(args: &Value, size: (u16, u16), kx: &str, ky: &str) -> Result<(u16, u16), String> {
+    let x = args[kx].as_f64().ok_or_else(|| format!("Missing \"{kx}\""))?;
+    let y = args[ky].as_f64().ok_or_else(|| format!("Missing \"{ky}\""))?;
+    desk_point(size, x, y)
+}
+
+async fn rdp_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<Out, String> {
+    use crate::rdp::InputEvent as E;
+    let t = find(&ctx.state(), &["rdp"], arg(args, "desktop")?)?;
+    if name == "rdp_screenshot" {
+        let session = desktop_session(ctx, &t).await?;
+        return screenshot(ctx, &t, &session).await;
+    }
+    if !matches!(name, "rdp_click" | "rdp_move" | "rdp_drag" | "rdp_scroll" | "rdp_type" | "rdp_key") {
+        return Err(format!("Unknown tool {name}"));
+    }
+    need_write(&t)?;
+    let mcp = &ctx.state().mcp;
+    if mcp.rdp_is_paused(&t.id) {
+        return Err(paused_message(&t.name));
+    }
+    // Check what can be checked before asking the user.
+    let text = args["text"].as_str().unwrap_or("");
+    if name == "rdp_type" && (text.is_empty() || text.chars().count() > MAX_TYPED) {
+        return Err(format!("Give \"text\" of 1 to {MAX_TYPED} characters"));
+    }
+    let keys = if name == "rdp_key" { Some(crate::rdp::key_events(arg(args, "keys")?)?) } else { None };
+    let held = match opt(args, "modifiers") {
+        Some(m) => crate::rdp::key_events(m)?.into_iter().filter(|e| matches!(e, E::Key { down: true, .. })).collect(),
+        None => Vec::new(),
+    };
+    let detail = match name {
+        "rdp_type" => format!("Type:\n{}", clip(text.to_string(), 2000)),
+        _ => rdp_describe(name, args),
+    };
+    // One OK covers all of Claude's mouse and keyboard use on this desktop.
+    approve(ctx, &t, "rdp_control", format!("Use the mouse and keyboard on {}", t.name), detail).await?;
+    if mcp.rdp_is_paused(&t.id) {
+        return Err(paused_message(&t.name));
+    }
+    let session = desktop_session(ctx, &t).await?;
+    let rdp = ctx.state().rdp.clone();
+    let size = rdp.size(&session).ok_or_else(|| format!("{} isn't connected any more.", t.name))?;
+    let send = |events: Vec<E>| {
+        if rdp.input(&session, events) {
+            Ok(())
+        } else {
+            Err(format!("{} isn't connected any more.", t.name))
+        }
+    };
+    let release = |held: &[E]| -> Vec<E> {
+        held.iter().rev().filter_map(|e| if let E::Key { code, .. } = e { Some(E::Key { code: *code, down: false }) } else { None }).collect()
+    };
+    let sleep = |ms: u64| tokio::time::sleep(Duration::from_millis(ms));
+    let done = match name {
+        "rdp_click" => {
+            let (x, y) = point(args, size, "x", "y")?;
+            let button = match opt(args, "button").unwrap_or("left") {
+                "left" => 0,
+                "middle" => 1,
+                "right" => 2,
+                other => return Err(format!("Unknown button {other}; use left, right or middle")),
+            };
+            let clicks = args["clicks"].as_u64().unwrap_or(1).clamp(1, 3);
+            let mut ev = vec![E::Move { x, y }];
+            ev.extend(held.iter().cloned());
+            for _ in 0..clicks {
+                ev.push(E::Button { button, down: true });
+                ev.push(E::Button { button, down: false });
+            }
+            ev.extend(release(&held));
+            send(ev)?;
+            rdp_describe(name, args)
+        }
+        "rdp_move" => {
+            let (x, y) = point(args, size, "x", "y")?;
+            send(vec![E::Move { x, y }])?;
+            rdp_describe(name, args)
+        }
+        "rdp_drag" => {
+            let (x, y) = point(args, size, "x", "y")?;
+            let (tx, ty) = point(args, size, "to_x", "to_y")?;
+            send(vec![E::Move { x, y }, E::Button { button: 0, down: true }])?;
+            sleep(80).await;
+            const STEPS: i32 = 12;
+            for i in 1..=STEPS {
+                let lerp = |a: u16, b: u16| (i32::from(a) + (i32::from(b) - i32::from(a)) * i / STEPS) as u16;
+                if send(vec![E::Move { x: lerp(x, tx), y: lerp(y, ty) }]).is_err() {
+                    break;
+                }
+                sleep(16).await;
+            }
+            sleep(80).await;
+            send(vec![E::Move { x: tx, y: ty }, E::Button { button: 0, down: false }])?;
+            rdp_describe(name, args)
+        }
+        "rdp_scroll" => {
+            let (x, y) = point(args, size, "x", "y")?;
+            let amount = args["amount"].as_u64().unwrap_or(3).clamp(1, 25);
+            let (delta, horizontal) = match opt(args, "direction").unwrap_or("down") {
+                "up" => (120, false),
+                "down" => (-120, false),
+                "right" => (120, true),
+                "left" => (-120, true),
+                other => return Err(format!("Unknown direction {other}; use up, down, left or right")),
+            };
+            let mut ev = vec![E::Move { x, y }];
+            ev.extend((0..amount).map(|_| E::Wheel { delta, horizontal }));
+            send(ev)?;
+            rdp_describe(name, args)
+        }
+        "rdp_type" => {
+            // In small batches, so a long text doesn't flood the connection and can be stopped.
+            let events = crate::rdp::text_events(text);
+            for chunk in events.chunks(64) {
+                if ctx.stopped() {
+                    return Err(STOPPED.into());
+                }
+                if mcp.rdp_is_paused(&t.id) {
+                    return Err(paused_message(&t.name));
+                }
+                send(chunk.to_vec())?;
+                sleep(15).await;
+            }
+            format!("Typed {} characters", text.chars().count())
+        }
+        _ => {
+            send(keys.unwrap_or_default())?;
+            rdp_describe(name, args)
+        }
+    };
+    if args["screenshot"].as_bool() == Some(false) {
+        return Ok(Out::from(format!("{done}.")));
+    }
+    sleep(SETTLE.as_millis() as u64).await;
+    let mut out = screenshot(ctx, &t, &session).await?;
+    out.text = format!("{done}. {}", out.text);
+    Ok(out)
+}
+
 // ---- setting up Claude ----
 
 /// The program Claude should start.
@@ -1435,7 +1834,10 @@ mod tests {
             }
         }
         let writes: Vec<&str> = defs.iter().filter(|d| d["annotations"]["readOnlyHint"] == false).map(|d| d["name"].as_str().unwrap()).collect();
-        assert_eq!(writes, ["db_execute", "server_run", "files_write", "run_saved_command"]);
+        assert_eq!(
+            writes,
+            ["db_execute", "server_run", "files_write", "rdp_click", "rdp_move", "rdp_drag", "rdp_scroll", "rdp_type", "rdp_key", "run_saved_command"]
+        );
     }
 
     #[test]
@@ -1465,6 +1867,23 @@ mod tests {
         };
         assert_eq!(table_text(&r), "id | note\n1 | NULL\n2 | a\\|b\\nc\n(2 rows)");
         assert_eq!(table_text(&StatementResult { affected: Some(3), ..Default::default() }), "OK, 3 rows affected");
+    }
+
+    #[test]
+    fn screenshot_points_map_to_the_desktop() {
+        // 1920×1080 is shown at 1280×720.
+        assert_eq!(desk_point((1920, 1080), 640.0, 360.0).unwrap(), (960, 540));
+        assert_eq!(desk_point((1920, 1080), 1280.0, 720.0).unwrap(), (1919, 1079));
+        assert!(desk_point((1920, 1080), 1300.0, 10.0).is_err());
+        assert_eq!(desk_point((1024, 768), 100.0, 50.0).unwrap(), (100, 50));
+    }
+
+    #[test]
+    fn rdp_actions_read_well() {
+        assert_eq!(rdp_describe("rdp_click", &json!({ "x": 10, "y": 20 })), "Click at 10, 20");
+        assert_eq!(rdp_describe("rdp_click", &json!({ "x": 10, "y": 20, "clicks": 2 })), "Double-click at 10, 20");
+        assert_eq!(rdp_describe("rdp_click", &json!({ "x": 1, "y": 2, "button": "right" })), "Right-click at 1, 2");
+        assert_eq!(rdp_describe("rdp_key", &json!({ "keys": "ctrl+c" })), "Press ctrl+c");
     }
 
     #[test]

@@ -1080,8 +1080,64 @@ fn rdp_release(state: State<'_, AppState>, session_id: String) {
 }
 
 #[tauri::command]
-fn rdp_close(state: State<'_, AppState>, session_id: String) {
+fn rdp_close(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String) {
     state.rdp.close(&session_id);
+    if let Some(w) = app.get_webview_window(&rdp_window_label(&session_id)) {
+        let _ = w.close();
+    }
+}
+
+/// Shows a session in the window or tab that owns `events` from now on.
+/// False when the session has ended.
+#[tauri::command]
+fn rdp_attach(state: State<'_, AppState>, session_id: String, events: Channel<InvokeResponseBody>) -> bool {
+    state.rdp.attach(&session_id, events)
+}
+
+/// The saved connection a running session belongs to.
+#[tauri::command]
+fn rdp_session_conn(state: State<'_, AppState>, session_id: String) -> Option<String> {
+    state.rdp.conn_of(&session_id)
+}
+
+/// The window a popped-out session lives in.
+fn rdp_window_label(session_id: &str) -> String {
+    let safe: String = session_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    format!("rdp-{safe}")
+}
+
+/// Opens a session in a window of its own (or brings that window forward).
+/// When the window closes, the tab gets the session back ("rdp-docked").
+/// Async: creating a window from a synchronous command can hang on Windows.
+#[tauri::command]
+async fn rdp_popout(app: tauri::AppHandle, session_id: String, title: String, width: f64, height: f64) -> AppResult<()> {
+    let label = rdp_window_label(&session_id);
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let window = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
+        .title(format!("{title} · Tusk"))
+        .inner_size(width.max(480.0), height.max(320.0))
+        .min_inner_size(400.0, 300.0)
+        .build()
+        .map_err(|e| AppError::msg(format!("Couldn't open a window: {e}")))?;
+    let handle = app.clone();
+    window.on_window_event(move |e| {
+        if let tauri::WindowEvent::Destroyed = e {
+            let _ = handle.emit_to("main", "rdp-docked", &session_id);
+        }
+    });
+    Ok(())
+}
+
+/// Closes a session's own window; its tab takes the session back.
+#[tauri::command]
+fn rdp_dock(app: tauri::AppHandle, session_id: String) {
+    if let Some(w) = app.get_webview_window(&rdp_window_label(&session_id)) {
+        let _ = w.close();
+    }
 }
 
 // ---- Claude (MCP) ----
@@ -1132,6 +1188,13 @@ fn claude_decide(state: State<'_, AppState>, id: String, decision: String) {
 #[tauri::command]
 fn claude_stop(state: State<'_, AppState>, id: u64) {
     state.mcp.stop_call(id);
+}
+
+/// The user takes a remote desktop back from Claude (or hands it over again).
+#[tauri::command]
+fn claude_rdp_pause(app: tauri::AppHandle, state: State<'_, AppState>, conn_id: String, paused: bool) {
+    state.mcp.set_rdp_paused(&conn_id, paused);
+    let _ = app.emit("claude-changed", ());
 }
 
 #[tauri::command]
@@ -1368,6 +1431,16 @@ pub fn run() {
             }
             Ok(())
         })
+        // Popped-out remote desktops close with the main window.
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                for (label, w) in window.app_handle().webview_windows() {
+                    if label.starts_with("rdp-") {
+                        let _ = w.close();
+                    }
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_connections,
             save_connection,
@@ -1448,6 +1521,11 @@ pub fn run() {
             rdp_resize,
             rdp_release,
             rdp_close,
+            rdp_attach,
+            rdp_session_conn,
+            rdp_popout,
+            rdp_dock,
+            claude_rdp_pause,
             save_ftp_site,
             delete_ftp_site,
             set_ftp_password,

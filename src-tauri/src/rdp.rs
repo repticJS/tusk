@@ -7,6 +7,10 @@
 //! - binary, first byte 2: mouse pointer image, u16 width, height,
 //!   hotspot x, hotspot y, then RGBA pixels
 //! - JSON events (connected, resized, pointer, closed)
+//!
+//! A session can move to another window (popped out) and back: the window
+//! attaches its own channel and gets the whole screen again. Claude can see
+//! and use a session through the same input (see mcp.rs).
 
 use crate::error::{AppError, AppResult};
 use crate::store::RdpConfig;
@@ -28,9 +32,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 type Framed = ironrdp_tokio::TokioFramed<ironrdp_tls::TlsStream<tokio::net::TcpStream>>;
 
@@ -64,27 +69,81 @@ enum Input {
     Resize { width: u16, height: u16, scale: u32 },
     /// Lets go of every key and button (the tab lost focus).
     ReleaseAll,
+    /// Screen updates go to this channel from now on (another window).
+    Attach(Channel<InvokeResponseBody>),
+    /// A copy of the whole screen.
+    Capture(oneshot::Sender<Frame>),
     Close,
     #[cfg(windows)]
     Clipboard(ironrdp_cliprdr::backend::ClipboardMessage),
 }
 
+/// The whole screen, RGBA, rows packed.
+pub struct Frame {
+    pub width: u16,
+    pub height: u16,
+    pub rgba: Vec<u8>,
+}
+
+/// A connected session.
+#[derive(Clone)]
+struct Handle {
+    tx: mpsc::UnboundedSender<Input>,
+    conn_id: String,
+    /// The remote desktop's current size.
+    size: Arc<Mutex<(u16, u16)>>,
+}
+
 #[derive(Default)]
 pub struct RdpSessions {
-    sessions: std::sync::Mutex<HashMap<String, mpsc::UnboundedSender<Input>>>,
+    sessions: Mutex<HashMap<String, Handle>>,
     /// Passwords typed at a prompt, kept for this run of the app only.
-    pub passwords: std::sync::Mutex<HashMap<String, String>>,
+    pub passwords: Mutex<HashMap<String, String>>,
 }
 
 impl RdpSessions {
-    fn send(&self, id: &str, input: Input) {
-        if let Some(tx) = self.sessions.lock().unwrap().get(id) {
-            let _ = tx.send(input);
+    fn send(&self, id: &str, input: Input) -> bool {
+        match self.sessions.lock().unwrap().get(id) {
+            Some(h) => h.tx.send(input).is_ok(),
+            None => false,
         }
     }
 
-    pub fn input(&self, id: &str, events: Vec<InputEvent>) {
-        self.send(id, Input::Events(events));
+    /// Sends the screen to another window's channel (false: no such session).
+    pub fn attach(&self, id: &str, events: Channel<InvokeResponseBody>) -> bool {
+        self.send(id, Input::Attach(events))
+    }
+
+    /// The saved connection a session belongs to.
+    pub fn conn_of(&self, id: &str) -> Option<String> {
+        self.sessions.lock().unwrap().get(id).map(|h| h.conn_id.clone())
+    }
+
+    /// A connected session of this saved connection, if any.
+    pub fn session_for(&self, conn_id: &str) -> Option<String> {
+        let map = self.sessions.lock().unwrap();
+        let mut ids: Vec<&String> = map.iter().filter(|(_, h)| h.conn_id == conn_id).map(|(id, _)| id).collect();
+        ids.sort();
+        ids.first().map(|s| s.to_string())
+    }
+
+    /// The remote desktop's size in pixels.
+    pub fn size(&self, id: &str) -> Option<(u16, u16)> {
+        self.sessions.lock().unwrap().get(id).map(|h| *h.size.lock().unwrap())
+    }
+
+    /// The whole screen as it is now.
+    pub async fn capture(&self, id: &str) -> Option<Frame> {
+        let (tx, rx) = oneshot::channel();
+        if !self.send(id, Input::Capture(tx)) {
+            return None;
+        }
+        tokio::time::timeout(Duration::from_secs(10), rx).await.ok()?.ok()
+    }
+
+    /// False when the session has ended.
+    pub fn input(&self, id: &str, events: Vec<InputEvent>) -> bool {
+        self.send(id, Input::Events(events))
     }
 
     pub fn resize(&self, id: &str, width: u16, height: u16, scale: u32) {
@@ -96,8 +155,8 @@ impl RdpSessions {
     }
 
     pub fn close(&self, id: &str) {
-        if let Some(tx) = self.sessions.lock().unwrap().remove(id) {
-            let _ = tx.send(Input::Close);
+        if let Some(h) = self.sessions.lock().unwrap().remove(id) {
+            let _ = h.tx.send(Input::Close);
         }
     }
 }
@@ -187,6 +246,190 @@ fn encode_pointer(p: &ironrdp_graphics::pointer::DecodedPointer) -> Vec<u8> {
         out.extend_from_slice(&v.to_le_bytes());
     }
     out.extend_from_slice(&p.bitmap_data);
+    out
+}
+
+/// The mouse pointer as last shown, to show again in a window that attaches.
+enum LastPointer {
+    Default,
+    Hidden,
+    Bitmap(Vec<u8>),
+}
+
+impl LastPointer {
+    fn message(&self) -> InvokeResponseBody {
+        match self {
+            LastPointer::Default => json(&RdpEvent::Pointer { kind: "default" }),
+            LastPointer::Hidden => json(&RdpEvent::Pointer { kind: "hidden" }),
+            LastPointer::Bitmap(b) => InvokeResponseBody::Raw(b.clone()),
+        }
+    }
+}
+
+/// A packed copy of the screen (alpha forced opaque).
+fn frame(image: &DecodedImage) -> Frame {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let stride = image.stride();
+    let data = image.data();
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for row in 0..h {
+        let start = row * stride;
+        rgba.extend_from_slice(&data[start..start + w * 4]);
+    }
+    for a in rgba.iter_mut().skip(3).step_by(4) {
+        *a = 255;
+    }
+    Frame { width: image.width(), height: image.height(), rgba }
+}
+
+// ---- screenshots for Claude ----
+
+/// The size a screenshot of a `width`×`height` screen is shown at: within
+/// `max_w`×`max_h`, never enlarged.
+pub fn shot_size(width: u16, height: u16, max_w: u32, max_h: u32) -> (u32, u32) {
+    let (w, h) = (u32::from(width.max(1)), u32::from(height.max(1)));
+    let f = (f64::from(max_w) / f64::from(w)).min(f64::from(max_h) / f64::from(h)).min(1.0);
+    (((f64::from(w) * f).round() as u32).max(1), ((f64::from(h) * f).round() as u32).max(1))
+}
+
+/// Shrinks the screen to `tw`×`th` (each pixel the average of the ones it
+/// covers) and encodes it as an RGB PNG.
+pub fn screenshot_png(f: &Frame, tw: u32, th: u32) -> Result<Vec<u8>, String> {
+    let (sw, sh) = (f.width as usize, f.height as usize);
+    let (tw, th) = (tw as usize, th as usize);
+    let mut rgb = Vec::with_capacity(tw * th * 3);
+    for ty in 0..th {
+        let y0 = ty * sh / th;
+        let y1 = ((ty + 1) * sh / th).max(y0 + 1).min(sh);
+        for tx in 0..tw {
+            let x0 = tx * sw / tw;
+            let x1 = ((tx + 1) * sw / tw).max(x0 + 1).min(sw);
+            let mut sum = [0u32; 3];
+            for y in y0..y1 {
+                let row = &f.rgba[(y * sw + x0) * 4..(y * sw + x1) * 4];
+                for p in row.chunks_exact(4) {
+                    sum[0] += u32::from(p[0]);
+                    sum[1] += u32::from(p[1]);
+                    sum[2] += u32::from(p[2]);
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            rgb.extend(sum.iter().map(|s| (s / n) as u8));
+        }
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, tw as u32, th as u32);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.set_compression(png::Compression::Fast);
+        let mut w = enc.write_header().map_err(|e| e.to_string())?;
+        w.write_image_data(&rgb).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+/// Key names Claude uses ("ctrl", "enter", "f4", "a"…) as set-1 scancodes.
+pub fn key_code(name: &str) -> Option<u16> {
+    let n = name.trim().to_lowercase();
+    let n = if n.chars().count() > 1 { n.replace(['_', ' '], "") } else { n };
+    Some(match n.as_str() {
+        "ctrl" | "control" | "lctrl" | "ctrlleft" | "controlleft" => 0x1d,
+        "rctrl" | "ctrlright" | "controlright" => 0xe01d,
+        "shift" | "lshift" | "shiftleft" => 0x2a,
+        "rshift" | "shiftright" => 0x36,
+        "alt" | "lalt" | "altleft" | "option" => 0x38,
+        "ralt" | "altright" | "altgr" => 0xe038,
+        "win" | "windows" | "super" | "meta" | "cmd" | "command" | "start" | "lwin" | "metaleft" => 0xe05b,
+        "rwin" | "metaright" => 0xe05c,
+        "enter" | "return" | "kpenter" => 0x1c,
+        "esc" | "escape" => 0x01,
+        "tab" => 0x0f,
+        "backspace" | "back" => 0x0e,
+        "delete" | "del" => 0xe053,
+        "insert" | "ins" => 0xe052,
+        "home" => 0xe047,
+        "end" => 0xe04f,
+        "pageup" | "pgup" | "prior" => 0xe049,
+        "pagedown" | "pgdn" | "next" => 0xe051,
+        "up" | "arrowup" => 0xe048,
+        "down" | "arrowdown" => 0xe050,
+        "left" | "arrowleft" => 0xe04b,
+        "right" | "arrowright" => 0xe04d,
+        "space" | "spacebar" | " " => 0x39,
+        "capslock" | "caps" => 0x3a,
+        "numlock" => 0x45,
+        "scrolllock" => 0x46,
+        "printscreen" | "print" | "prtsc" | "prtscn" => 0xe037,
+        "menu" | "apps" | "contextmenu" => 0xe05d,
+        "-" | "minus" => 0x0c,
+        "=" | "equal" | "equals" => 0x0d,
+        "[" | "bracketleft" => 0x1a,
+        "]" | "bracketright" => 0x1b,
+        ";" | "semicolon" => 0x27,
+        "'" | "quote" | "apostrophe" => 0x28,
+        "`" | "grave" | "backquote" => 0x29,
+        "\\" | "backslash" => 0x2b,
+        "," | "comma" => 0x33,
+        "." | "period" => 0x34,
+        "/" | "slash" => 0x35,
+        _ => {
+            if let Some(f) = n.strip_prefix('f').and_then(|d| d.parse::<u16>().ok()) {
+                return match f {
+                    1..=10 => Some(0x3a + f),
+                    11 => Some(0x57),
+                    12 => Some(0x58),
+                    13..=23 => Some(0x64 + f - 13),
+                    24 => Some(0x76),
+                    _ => None,
+                };
+            }
+            let mut chars = n.chars();
+            let (Some(c), None) = (chars.next(), chars.next()) else { return None };
+            const ROWS: [(&str, u16); 3] = [("qwertyuiop", 0x10), ("asdfghjkl", 0x1e), ("zxcvbnm", 0x2c)];
+            if let Some(code) = ROWS.iter().find_map(|(row, base)| row.find(c).map(|i| base + i as u16)) {
+                return Some(code);
+            }
+            return match c {
+                '1'..='9' => Some(0x02 + (c as u16 - '1' as u16)),
+                '0' => Some(0x0b),
+                _ => None,
+            };
+        }
+    })
+}
+
+/// "ctrl+shift+esc alt+f4" → presses: each combination held down in order
+/// and let go in reverse.
+pub fn key_events(keys: &str) -> Result<Vec<InputEvent>, String> {
+    let mut out = Vec::new();
+    for combo in keys.split_whitespace() {
+        // "ctrl++" means ctrl and the plus key, which isn't a key of its own.
+        let parts: Vec<&str> = combo.split('+').filter(|p| !p.is_empty()).collect();
+        let mut codes = Vec::new();
+        for p in &parts {
+            codes.push(key_code(p).ok_or_else(|| format!("Unknown key \"{p}\"; use names like ctrl, alt, shift, win, enter, esc, tab, f4, a, 1"))?);
+        }
+        out.extend(codes.iter().map(|&code| InputEvent::Key { code, down: true }));
+        out.extend(codes.iter().rev().map(|&code| InputEvent::Key { code, down: false }));
+    }
+    if out.is_empty() {
+        return Err("No keys given".into());
+    }
+    Ok(out)
+}
+
+/// Text as key presses: Enter and Tab as keys, everything else as Unicode.
+pub fn text_events(text: &str) -> Vec<InputEvent> {
+    let mut out = Vec::new();
+    for ch in text.chars() {
+        match ch {
+            '\r' => {}
+            '\n' => out.extend([InputEvent::Key { code: 0x1c, down: true }, InputEvent::Key { code: 0x1c, down: false }]),
+            '\t' => out.extend([InputEvent::Key { code: 0x0f, down: true }, InputEvent::Key { code: 0x0f, down: false }]),
+            c => out.extend([InputEvent::Unicode { ch: c, down: true }, InputEvent::Unicode { ch: c, down: false }]),
+        }
+    }
     out
 }
 
@@ -445,14 +688,17 @@ pub async fn open(
             return Err(e);
         }
     };
-    if let Some(old) = sessions.sessions.lock().unwrap().insert(req.session_id.clone(), tx.clone()) {
-        let _ = old.send(Input::Close);
+    let desk = Arc::new(Mutex::new((first.0.desktop_size.width, first.0.desktop_size.height)));
+    let handle = Handle { tx: tx.clone(), conn_id: c.id.clone(), size: desk.clone() };
+    if let Some(old) = sessions.sessions.lock().unwrap().insert(req.session_id.clone(), handle) {
+        let _ = old.tx.send(Input::Close);
     }
     let id = req.session_id;
     let known_path = req.known_hosts;
     let scale = req.scale;
     tokio::spawn(async move {
         let mut rx = rx;
+        let mut events = events;
         let mut next = Some(first);
         let mut size = size;
         let reason = loop {
@@ -463,8 +709,9 @@ pub async fn open(
                     Err(e) => break Some(e.message),
                 },
             };
+            *desk.lock().unwrap() = (result.desktop_size.width, result.desktop_size.height);
             let _ = events.send(json(&RdpEvent::Connected { width: result.desktop_size.width, height: result.desktop_size.height }));
-            match run(framed, result, &events, &mut rx).await {
+            match run(framed, result, &mut events, &mut rx, &desk).await {
                 Ok(Flow::Reconnect(s)) => size = s,
                 Ok(Flow::Ended(reason)) => break reason,
                 Err(e) => break Some(e),
@@ -474,7 +721,7 @@ pub async fn open(
         clipboard.stop(&app);
         // Forget the session unless a newer one took its place.
         let mut map = sessions.sessions.lock().unwrap();
-        if map.get(&id).is_some_and(|t| t.same_channel(&tx)) {
+        if map.get(&id).is_some_and(|h| h.tx.same_channel(&tx)) {
             map.remove(&id);
         }
     });
@@ -495,8 +742,9 @@ fn session_err(e: impl std::fmt::Display) -> String {
 async fn run(
     framed: Framed,
     result: ConnectionResult,
-    events: &Channel<InvokeResponseBody>,
+    events: &mut Channel<InvokeResponseBody>,
     rx: &mut mpsc::UnboundedReceiver<Input>,
+    desk: &Mutex<(u16, u16)>,
 ) -> Result<Flow, String> {
     let (mut reader, mut writer) = split_tokio_framed(framed);
     let size = result.desktop_size;
@@ -520,6 +768,7 @@ async fn run(
     let mut housekeeping = tokio::time::interval(Duration::from_secs(5));
     // The size last asked for, until the server has switched to it.
     let mut requested: Option<DesktopSize> = None;
+    let mut pointer = LastPointer::Default;
 
     loop {
         let outputs = tokio::select! {
@@ -557,6 +806,19 @@ async fn run(
                         }
                     }
                 }
+                Some(Input::Attach(ch)) => {
+                    // A new window: tell it the size, then show it everything.
+                    *events = ch;
+                    let _ = events.send(json(&RdpEvent::Connected { width: image.width(), height: image.height() }));
+                    let _ = events.send(pointer.message());
+                    dirty.0.clear();
+                    dirty.add(full(&image));
+                    Vec::new()
+                }
+                Some(Input::Capture(reply)) => {
+                    let _ = reply.send(frame(&image));
+                    Vec::new()
+                }
                 Some(Input::Close) => stage.graceful_shutdown().map_err(session_err)?,
                 #[cfg(windows)]
                 Some(Input::Clipboard(m)) => clipboard_message(&mut stage, m)?,
@@ -585,13 +847,16 @@ async fn run(
                 ActiveStageOutput::ResponseFrame(frame) => writer.write_all(&frame).await.map_err(session_err)?,
                 ActiveStageOutput::GraphicsUpdate(rect) => dirty.add(rect),
                 ActiveStageOutput::PointerDefault => {
-                    let _ = events.send(json(&RdpEvent::Pointer { kind: "default" }));
+                    pointer = LastPointer::Default;
+                    let _ = events.send(pointer.message());
                 }
                 ActiveStageOutput::PointerHidden => {
-                    let _ = events.send(json(&RdpEvent::Pointer { kind: "hidden" }));
+                    pointer = LastPointer::Hidden;
+                    let _ = events.send(pointer.message());
                 }
                 ActiveStageOutput::PointerBitmap(p) => {
-                    let _ = events.send(InvokeResponseBody::Raw(encode_pointer(&p)));
+                    pointer = LastPointer::Bitmap(encode_pointer(&p));
+                    let _ = events.send(pointer.message());
                 }
                 ActiveStageOutput::DeactivateAll => {
                     // The server changed the session (often its size): run the
@@ -660,6 +925,7 @@ async fn run(
                     }
                     dirty.0.clear();
                     dirty.add(full(&image));
+                    *desk.lock().unwrap() = (desktop_size.width, desktop_size.height);
                     let _ = events.send(json(&RdpEvent::Resized { width: desktop_size.width, height: desktop_size.height }));
                 }
                 ActiveStageOutput::Terminate(reason) => {
@@ -845,6 +1111,44 @@ mod tests {
         assert!(matches!(to_operation(InputEvent::Key { code: 0xE04B, down: true }), Some(Operation::KeyPressed(s)) if s.as_u16() == 0xE04B));
         assert!(matches!(to_operation(InputEvent::Button { button: 2, down: false }), Some(Operation::MouseButtonReleased(MouseButton::Right))));
         assert!(to_operation(InputEvent::Button { button: 9, down: true }).is_none());
+    }
+
+    #[test]
+    fn screenshots_shrink_to_fit() {
+        assert_eq!(shot_size(1920, 1080, 1280, 800), (1280, 720));
+        assert_eq!(shot_size(1024, 768, 1280, 800), (1024, 768), "never enlarged");
+        assert_eq!(shot_size(1280, 1024, 1280, 800), (1000, 800));
+        let f = Frame { width: 4, height: 2, rgba: [[255, 0, 0, 255], [0, 0, 255, 255]].repeat(4).concat() };
+        let png = screenshot_png(&f, 2, 1).unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+    }
+
+    #[test]
+    fn key_names_become_scancodes() {
+        assert_eq!(key_code("Ctrl"), Some(0x1d));
+        assert_eq!(key_code("Return"), Some(0x1c));
+        assert_eq!(key_code("Page_Up"), Some(0xe049));
+        assert_eq!(key_code("f4"), Some(0x3e));
+        assert_eq!(key_code("F12"), Some(0x58));
+        assert_eq!(key_code("a"), Some(0x1e));
+        assert_eq!(key_code("M"), Some(0x32));
+        assert_eq!(key_code("0"), Some(0x0b));
+        assert_eq!(key_code("-"), Some(0x0c));
+        assert_eq!(key_code("nope"), None);
+        let ev = key_events("ctrl+alt+del").unwrap();
+        let codes: Vec<(u16, bool)> = ev.iter().map(|e| match e { InputEvent::Key { code, down } => (*code, *down), _ => panic!() }).collect();
+        assert_eq!(codes, [(0x1d, true), (0x38, true), (0xe053, true), (0xe053, false), (0x38, false), (0x1d, false)]);
+        assert_eq!(key_events("win+r enter").unwrap().len(), 6);
+        assert!(key_events("ctrl+bogus").is_err());
+        assert!(key_events("  ").is_err());
+    }
+
+    #[test]
+    fn text_types_enter_as_a_key() {
+        let ev = text_events("a\r\n");
+        assert!(matches!(ev[0], InputEvent::Unicode { ch: 'a', down: true }));
+        assert!(matches!(ev[2], InputEvent::Key { code: 0x1c, down: true }));
+        assert_eq!(ev.len(), 4);
     }
 
     #[test]

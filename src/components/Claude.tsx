@@ -8,6 +8,7 @@ import {
   Database,
   FolderClosed,
   FolderOpen,
+  ScreenShare,
   Server,
   Settings,
   ShieldAlert,
@@ -115,6 +116,13 @@ const TOOL_WORDS: Record<string, [string, string]> = {
   files_read: ["Reading a file", "Read a file"],
   files_write: ["Writing a file", "Wrote a file"],
   run_saved_command: ["Running a saved command", "Ran a saved command"],
+  rdp_screenshot: ["Looking at the screen", "Looked at the screen"],
+  rdp_click: ["Clicking", "Clicked"],
+  rdp_move: ["Moving the pointer", "Moved the pointer"],
+  rdp_drag: ["Dragging", "Dragged"],
+  rdp_scroll: ["Scrolling", "Scrolled"],
+  rdp_type: ["Typing", "Typed"],
+  rdp_key: ["Pressing keys", "Pressed keys"],
 };
 
 const busy = (a: ClaudeActivity) => a.outcome === "running" || a.outcome === "waiting";
@@ -195,7 +203,9 @@ function OpenInTusk({ a }: { a: ClaudeActivity }) {
         ? s.sshHosts.some((h) => h.id === a.targetId)
         : a.targetKind === "ftp"
           ? s.ftpSites.some((f) => f.id === a.targetId)
-          : false,
+          : a.targetKind === "rdp"
+            ? s.rdpConnections.some((r) => r.id === a.targetId)
+            : false,
   );
   if (!exists) return null;
   const st = useApp.getState();
@@ -209,7 +219,9 @@ function OpenInTusk({ a }: { a: ClaudeActivity }) {
       run: () => void st.openQueryTab(a.targetId, a.database || conn?.database || "postgres", sql || undefined),
     });
   }
-  if (a.targetKind) {
+  if (a.targetKind === "rdp") {
+    buttons.push({ label: "Show desktop", icon: <ScreenShare size={11} />, run: () => st.openRdpTab(a.targetId) });
+  } else if (a.targetKind) {
     buttons.push({ label: "Watch in terminal", icon: <Bot size={11} />, run: () => st.openClaudeTerm(a.targetKind as "server", a.targetId) });
   }
   if (a.targetKind === "server") {
@@ -305,6 +317,14 @@ function ActivityRow({ a, autoOpen = false }: { a: ClaudeActivity; autoOpen?: bo
           {!running && a.result && (
             <Block title="What Claude got back" text={a.result} tall tone={a.outcome === "error" ? "text-danger" : ""} />
           )}
+          {!running && a.image && (
+            <img
+              src={`data:image/png;base64,${a.image}`}
+              alt={`What Claude saw on ${a.target}`}
+              className="max-h-56 w-fit max-w-full rounded border border-border object-contain"
+              data-activity-image
+            />
+          )}
           <OpenInTusk a={a} />
         </div>
       )}
@@ -384,6 +404,7 @@ export function ClaudeTab({ active }: { tab: ClaudeTabModel; active: boolean }) 
   const connections = useApp((s) => s.connections);
   const sshHosts = useApp((s) => s.sshHosts);
   const ftpSites = useApp((s) => s.ftpSites);
+  const rdpConnections = useApp((s) => s.rdpConnections);
   const folders = useApp((s) => s.folders);
   const { loadClaude, showToast } = useApp.getState();
   const [busy, setBusy] = useState(false);
@@ -465,6 +486,16 @@ export function ClaudeTab({ active }: { tab: ClaudeTabModel; active: boolean }) 
       title: "FTP sites",
       icon: <Server size={13} className="text-muted" />,
       items: ftpSites.map((f) => ({ id: f.id, name: f.name, folderId: f.folderId ?? null, detail: f.host })),
+    },
+    {
+      title: "Remote desktops",
+      icon: <ScreenShare size={13} className="text-accent" />,
+      items: rdpConnections.map((r) => ({
+        id: r.id,
+        name: r.name,
+        folderId: r.folderId ?? null,
+        detail: r.host,
+      })),
     },
   ].filter((g) => g.items.length);
 
@@ -551,6 +582,7 @@ export function ClaudeTab({ active }: { tab: ClaudeTabModel; active: boolean }) 
             <div className="mt-0.5 text-[12px] text-muted">
               Everything starts with no access. Read only can look but not change anything (database queries run in a read-only
               transaction). Read & write can also change data, run commands and write files, and asks you first unless you untick it.
+              On a remote desktop, read only lets Claude see the screen; read & write also lets it use the mouse and keyboard.
             </div>
           </div>
           {groups.length === 0 && <div className="px-4 py-3 text-[12.5px] text-faint">Add connections in the sidebar first.</div>}

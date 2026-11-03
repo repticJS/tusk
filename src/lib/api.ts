@@ -818,12 +818,7 @@ export const rdpApi = {
     onData: (data: ArrayBuffer) => void,
     onEvent: (e: RdpEvent) => void,
   ) {
-    const events = new Channel<ArrayBuffer | RdpEvent>();
-    events.onmessage = (m) => {
-      if (m instanceof ArrayBuffer) onData(m);
-      else if (ArrayBuffer.isView(m)) onData(m.buffer.slice(m.byteOffset, m.byteOffset + m.byteLength) as ArrayBuffer);
-      else onEvent(m);
-    };
+    const events = rdpChannel(onData, onEvent);
     return call<void>("rdp_open", { sessionId, connId, ...size, acceptFingerprint, events });
   },
   input: (sessionId: string, events: RdpInput[]) => invoke<void>("rdp_input", { sessionId, events }).catch(() => {}),
@@ -831,7 +826,28 @@ export const rdpApi = {
     invoke<void>("rdp_resize", { sessionId, width, height, scale }).catch(() => {}),
   release: (sessionId: string) => invoke<void>("rdp_release", { sessionId }).catch(() => {}),
   close: (sessionId: string) => invoke<void>("rdp_close", { sessionId }).catch(() => {}),
+  /** Shows a running session here (another window, or back in its tab). False when it has ended. */
+  attach(sessionId: string, onData: (data: ArrayBuffer) => void, onEvent: (e: RdpEvent) => void) {
+    return call<boolean>("rdp_attach", { sessionId, events: rdpChannel(onData, onEvent) });
+  },
+  /** The saved connection of a running session. */
+  sessionConn: (sessionId: string) => call<string | null>("rdp_session_conn", { sessionId }),
+  /** Moves a session to a window of its own (size in CSS pixels). */
+  popout: (sessionId: string, title: string, width: number, height: number) =>
+    call<void>("rdp_popout", { sessionId, title, width, height }),
+  /** Closes a session's own window; its tab takes it back. */
+  dock: (sessionId: string) => invoke<void>("rdp_dock", { sessionId }).catch(() => {}),
 };
+
+function rdpChannel(onData: (data: ArrayBuffer) => void, onEvent: (e: RdpEvent) => void) {
+  const events = new Channel<ArrayBuffer | RdpEvent>();
+  events.onmessage = (m) => {
+    if (m instanceof ArrayBuffer) onData(m);
+    else if (ArrayBuffer.isView(m)) onData(m.buffer.slice(m.byteOffset, m.byteOffset + m.byteLength) as ArrayBuffer);
+    else onEvent(m);
+  };
+  return events;
+}
 
 // ---- Claude (MCP) ----
 
@@ -859,7 +875,7 @@ export interface ClaudeActivity {
   client: string;
   tool: string;
   target: string;
-  targetKind: "" | "database" | "server" | "ftp";
+  targetKind: "" | "database" | "server" | "ftp" | "rdp";
   targetId: string;
   database: string;
   detail: string;
@@ -873,6 +889,8 @@ export interface ClaudeActivity {
   /** A command's output while it runs. */
   output: string;
   ms: number;
+  /** A screenshot Claude got back (PNG, base64); only the latest few keep theirs. */
+  image: string;
 }
 
 export interface ClaudeOutputChunk {
@@ -889,6 +907,8 @@ export interface ClaudeState {
   clients: string[];
   pending: ClaudeApproval[];
   activity: ClaudeActivity[];
+  /** Remote desktops the user took back from Claude. */
+  rdpPaused: string[];
   setup: { desktopInstalled: boolean; codeCommand: string; exe: string };
 }
 
@@ -898,6 +918,8 @@ export const claudeApi = {
   setAccess: (id: string, access: ClaudeAccess | null) => call<void>("claude_set_access", { id, access }),
   decide: (id: string, decision: "allow" | "session" | "deny") => call<void>("claude_decide", { id, decision }),
   clearActivity: () => call<void>("claude_clear_activity"),
+  /** Take a remote desktop back from Claude (true) or hand it over again (false). */
+  rdpPause: (connId: string, paused: boolean) => call<void>("claude_rdp_pause", { connId, paused }),
   /** Stop something Claude is running. */
   stop: (id: number) => call<void>("claude_stop", { id }),
   installDesktop: () => call<string[]>("claude_install_desktop"),

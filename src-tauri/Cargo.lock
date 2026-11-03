@@ -7477,6 +7477,7 @@ dependencies = [
  "ironrdp-tokio",
  "keyring",
  "native-tls",
+ "png 0.18.1",
  "portable-pty",
  "postgres-native-tls",
  "rand 0.8.8",
