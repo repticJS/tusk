@@ -1521,7 +1521,8 @@ async fn desktop_session(ctx: &Ctx, t: &Target) -> Result<String, String> {
         return Ok(id);
     }
     let _ = ctx.app.emit_to("main", "claude-open-rdp", &t.id);
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    // Long enough for a VPN sign-in in the browser.
+    let deadline = std::time::Instant::now() + Duration::from_secs(360);
     loop {
         if ctx.stopped() {
             return Err(STOPPED.into());
@@ -1533,7 +1534,7 @@ async fn desktop_session(ctx: &Ctx, t: &Target) -> Result<String, String> {
         }
         if std::time::Instant::now() > deadline {
             return Err(format!(
-                "Tusk couldn't connect to {} within 2 minutes. Ask the user to look at its tab in Tusk (it may need a password or their OK for the computer's certificate).",
+                "Tusk couldn't connect to {} within 6 minutes. Ask the user to look at its tab in Tusk (it may need a password, their OK for a certificate, or a VPN sign-in in their browser).",
                 t.name
             ));
         }

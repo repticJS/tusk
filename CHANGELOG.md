@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.18.0
+
+- Remote desktops behind a FortiGate VPN: set **Connect through** to *FortiGate VPN with single sign-on* and enter the gateway from FortiClient. Tusk signs in through your company's page in your browser and sends only that desktop through the VPN. The rest of your PC stays off the VPN, with no FortiClient, network adapter or admin rights needed.
+- The tunnel is shared by that desktop's tabs and closes with the last one. The gateway's certificate is checked like a remote desktop's, and you're asked before trusting one your PC doesn't.
+
 ## 0.17.0
 
 - Pop out a remote desktop: **Pop out** in its toolbar moves it to a window of its own without reconnecting, so you can put it on another monitor and make it full screen there. Closing the window (or **Back to tab**) brings it back to its tab.

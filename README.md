@@ -128,6 +128,7 @@ Connect to Windows PCs and servers (and Linux machines running xrdp) inside a Tu
 | Sign-in | User, domain and password saved in Windows Credential Manager (or asked each time), Network Level Authentication, a prompt when the password is wrong |
 | Security | The computer's certificate is checked the first time you connect, like SSH host keys, and you're warned if it changes. The password is only sent after that |
 | Display | Fit the tab (the remote screen follows the tab's size and your display scaling) or a fixed size that shrinks to fit or scrolls; 32- or 16-bit colour; best looking or fastest; full screen with a bar at the top edge |
+| VPN | **Connect through: FortiGate VPN with single sign-on** sends just this desktop through your company's FortiGate SSL VPN, which Tusk runs itself: you sign in on your company's page in the browser, and the rest of your PC stays off the VPN (no FortiClient, network adapter or admin rights). Close FortiClient while signing in, since both use port 8020 |
 | Pop out | **Pop out** moves the desktop to a window of its own without reconnecting: drag it to another monitor and make it full screen there. Close the window (or **Back to tab**) to put it back in its tab |
 | Extras | Sound plays on this PC, clipboard shared both ways (Windows), **Send keys** for Ctrl+Alt+Del, the Windows key, Alt+Tab and others the PC keeps for itself |
 

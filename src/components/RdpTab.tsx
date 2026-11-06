@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Bot, ChevronDown, ExternalLink, Hand, Keyboard, Maximize, Minimize, MonitorX, Pencil, PanelTopClose, Play, RotateCw, ScreenShare } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { claudeApi, DbError, rdpApi, type RdpEvent, type RdpInput } from "../lib/api";
@@ -46,7 +47,7 @@ const SPECIAL_KEYS: { label: string; keys: number[] }[] = [
 ];
 
 type Phase =
-  | { phase: "connecting" }
+  | { phase: "connecting"; text?: string; url?: string | null }
   | { phase: "connected" }
   | { phase: "closed"; message?: string | null }
   | { phase: "error"; message: string };
@@ -195,6 +196,8 @@ export function RdpTab({ tab, active, windowed = false }: { tab: RdpTabModel; ac
       }
       setDesk({ width: e.width, height: e.height });
       if (e.type === "connected") setState({ phase: "connected" });
+    } else if (e.type === "status") {
+      setState((s) => (s.phase === "connecting" ? { phase: "connecting", text: e.text, url: e.url } : s));
     } else if (e.type === "pointer") {
       setCursor(e.kind === "hidden" ? "none" : "default");
     } else if (e.type === "closed") {
@@ -538,8 +541,20 @@ export function RdpTab({ tab, active, windowed = false }: { tab: RdpTabModel; ac
         {!popped && state.phase !== "connected" && (
           <div className="absolute inset-0 flex items-center justify-center bg-bg/85 p-6">
             {state.phase === "connecting" ? (
-              <div className="flex items-center gap-2 text-[13px] text-muted">
-                <Spinner size={13} /> Connecting to {conn?.name ?? "the computer"}…
+              <div className="flex flex-col items-center gap-3 text-center">
+                <div className="flex items-center gap-2 text-[13px] text-muted" data-rdp-status>
+                  <Spinner size={13} /> {state.text ?? `Connecting to ${conn?.name ?? "the computer"}…`}
+                </div>
+                {state.url && (
+                  <>
+                    <div className="max-w-[420px] text-[12px] text-faint">
+                      Your browser should have opened your company's sign-in page. Tusk continues once you've signed in.
+                    </div>
+                    <button className="btn-outline" onClick={() => void openUrl(state.url!)}>
+                      <ExternalLink size={12} /> Open the sign-in page again
+                    </button>
+                  </>
+                )}
               </div>
             ) : (
               <div className="flex max-w-[460px] flex-col items-center gap-3 text-center" data-rdp-message>

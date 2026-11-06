@@ -784,12 +784,19 @@ export interface RdpConfig {
   sound: boolean;
   clipboard: boolean;
   fullScreen: boolean;
+  /** "" connects directly; "fortinet" goes through a FortiGate SSL VPN Tusk runs for this connection only. */
+  vpn: "" | "fortinet";
+  /** Like "vpn.example.com:10443". */
+  vpnGateway: string;
+  vpnRealm: string;
 }
 
 export type RdpEvent =
   | { type: "connected"; width: number; height: number }
   | { type: "resized"; width: number; height: number }
   | { type: "pointer"; kind: "default" | "hidden" }
+  /** Progress while connecting (VPN sign-in), with a page to open again if needed. */
+  | { type: "status"; text: string; url?: string | null }
   | { type: "closed"; reason?: string | null };
 
 /** Input for the remote desktop, in its pixels. Keys are set-1 scancodes (0xE0xx extended). */

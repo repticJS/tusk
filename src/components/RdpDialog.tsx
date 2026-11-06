@@ -35,7 +35,14 @@ export function RdpDialog() {
   const save = async (connect: boolean) => {
     setSaving(true);
     try {
-      const c: RdpConfig = { ...cfg, id: cfg.id || crypto.randomUUID(), name: cfg.name.trim() || cfg.host.trim(), host: cfg.host.trim() };
+      const c: RdpConfig = {
+        ...cfg,
+        id: cfg.id || crypto.randomUUID(),
+        name: cfg.name.trim() || cfg.host.trim(),
+        host: cfg.host.trim(),
+        vpnGateway: cfg.vpnGateway.trim(),
+        vpnRealm: cfg.vpnRealm.trim(),
+      };
       await rdpApi.save(c, touched ? password : null);
       await loadConnections();
       close();
@@ -65,7 +72,7 @@ export function RdpDialog() {
               Save
             </button>
           )}
-          <button className="btn-primary" onClick={() => void save(true)} disabled={saving || !cfg.host.trim()}>
+          <button className="btn-primary" onClick={() => void save(true)} disabled={saving || !cfg.host.trim() || (cfg.vpn !== "" && !cfg.vpnGateway.trim())}>
             {saving && <Spinner size={12} />} {isNew ? "Save & connect" : "Save & open"}
           </button>
         </>
@@ -140,6 +147,38 @@ export function RdpDialog() {
           <input type="checkbox" checked={cfg.savePassword} onChange={(e) => set("savePassword", e.target.checked)} />
           Save password <span className="text-faint">(Windows Credential Manager)</span>
         </label>
+
+        <div className="mt-1 text-[11px] font-semibold tracking-wide text-faint uppercase">Network</div>
+        <Field label="Connect through">
+          <select className="field" value={cfg.vpn} onChange={(e) => set("vpn", e.target.value as RdpConfig["vpn"])} aria-label="Connect through">
+            <option value="">Directly (this PC can reach the computer)</option>
+            <option value="fortinet">FortiGate VPN with single sign-on (FortiClient)</option>
+          </select>
+        </Field>
+        {cfg.vpn === "fortinet" && (
+          <>
+            <div className="flex gap-3">
+              <Field label="VPN gateway" className="flex-1">
+                <input
+                  className="field"
+                  value={cfg.vpnGateway}
+                  placeholder="vpn.example.com:10443"
+                  onChange={(e) => set("vpnGateway", e.target.value)}
+                  spellCheck={false}
+                  aria-label="VPN gateway"
+                />
+              </Field>
+              <Field label="Realm (optional)" className="w-40">
+                <input className="field" value={cfg.vpnRealm} onChange={(e) => set("vpnRealm", e.target.value)} spellCheck={false} />
+              </Field>
+            </div>
+            <div className="rounded-md bg-hover/60 px-3 py-2 text-[12px] text-muted">
+              Tusk signs in to the VPN itself and sends only this remote desktop through it; the rest of this PC stays off the VPN, with
+              no FortiClient needed. When you connect, your browser opens your company's sign-in page. Copy the gateway from FortiClient's{" "}
+              <b>Remote Gateway</b> (with its port). FortiClient must be closed while you sign in.
+            </div>
+          </>
+        )}
 
         <div className="mt-1 text-[11px] font-semibold tracking-wide text-faint uppercase">Display</div>
         <div className="flex gap-3">

@@ -54,6 +54,7 @@ ironrdp-rdpsnd-native = { git = "https://github.com/Devolutions/IronRDP", rev = 
 ironrdp-cliprdr = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
 sha2 = "0.10"
 rustls-platform-verifier = "0.7"
+smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-dns", "proto-dns"] }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

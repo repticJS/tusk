@@ -133,6 +133,16 @@ pub struct RdpConfig {
     /// Open full screen.
     #[serde(default)]
     pub full_screen: bool,
+    /// "" (connect directly) or "fortinet": through a FortiGate SSL VPN that
+    /// Tusk runs for this connection only.
+    #[serde(default)]
+    pub vpn: String,
+    /// The VPN gateway, like "vpn.example.com:10443".
+    #[serde(default)]
+    pub vpn_gateway: String,
+    /// The gateway's realm, when the company uses one.
+    #[serde(default)]
+    pub vpn_realm: String,
 }
 
 fn fit() -> String {
@@ -410,6 +420,13 @@ impl Store {
         }
         if config.size != "fit" && parse_size(&config.size).is_none() {
             return Err(AppError::msg(format!("Unknown screen size {}", config.size)));
+        }
+        match config.vpn.as_str() {
+            "" => {}
+            "fortinet" => {
+                crate::vpn::parse_gateway(&config.vpn_gateway)?;
+            }
+            other => return Err(AppError::msg(format!("Unknown VPN type {other}"))),
         }
         match self.file.rdp.iter_mut().find(|c| c.id == config.id) {
             Some(existing) => *existing = config,

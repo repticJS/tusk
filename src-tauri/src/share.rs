@@ -565,6 +565,9 @@ mod tests {
             sound: true,
             clipboard: true,
             full_screen: false,
+            vpn: "fortinet".into(),
+            vpn_gateway: "vpn.example.com:10443".into(),
+            vpn_realm: String::new(),
         })
         .unwrap();
         s.set_rdp_password("jump", Some("rdp-secret")).unwrap();

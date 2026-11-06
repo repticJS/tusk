@@ -57,6 +57,9 @@ export const blankRdp = (): RdpConfig => ({
   sound: true,
   clipboard: true,
   fullScreen: false,
+  vpn: "",
+  vpnGateway: "",
+  vpnRealm: "",
 });
 
 export const blankTunnel = (hostId = ""): TunnelConfig => ({

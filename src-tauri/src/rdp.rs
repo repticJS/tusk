@@ -37,7 +37,45 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio::sync::{mpsc, oneshot};
 
-type Framed = ironrdp_tokio::TokioFramed<ironrdp_tls::TlsStream<tokio::net::TcpStream>>;
+type Framed = ironrdp_tokio::TokioFramed<ironrdp_tls::TlsStream<Stream>>;
+
+/// The connection to the computer: direct, or through a VPN Tusk runs.
+enum Stream {
+    Tcp(tokio::net::TcpStream),
+    Vpn(tokio::io::DuplexStream),
+}
+
+impl tokio::io::AsyncRead for Stream {
+    fn poll_read(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Stream::Tcp(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Stream::Vpn(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for Stream {
+    fn poll_write(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Stream::Tcp(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            Stream::Vpn(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Stream::Tcp(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Stream::Vpn(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Stream::Tcp(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Stream::Vpn(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
 
 /// Batches screen updates: at most this often.
 const FLUSH_EVERY: Duration = Duration::from_millis(16);
@@ -99,6 +137,8 @@ pub struct RdpSessions {
     sessions: Mutex<HashMap<String, Handle>>,
     /// Passwords typed at a prompt, kept for this run of the app only.
     pub passwords: Mutex<HashMap<String, String>>,
+    /// VPN tunnels Tusk runs for connections that need one.
+    pub vpns: crate::vpn::Vpns,
 }
 
 impl RdpSessions {
@@ -158,6 +198,7 @@ impl RdpSessions {
         if let Some(h) = self.sessions.lock().unwrap().remove(id) {
             let _ = h.tx.send(Input::Close);
         }
+        self.vpns.release(id);
     }
 }
 
@@ -170,6 +211,8 @@ enum RdpEvent {
     Resized { width: u16, height: u16 },
     /// "default" or "hidden" (a pointer image comes as binary).
     Pointer { kind: &'static str },
+    /// Progress while connecting (signing in to a VPN), with a page to open.
+    Status { text: String, url: Option<String> },
     Closed { reason: Option<String> },
 }
 
@@ -577,6 +620,7 @@ fn connect_error(e: ironrdp_connector::ConnectorError, c: &RdpConfig) -> AppErro
 }
 
 /// Connects, checks the computer's certificate and signs in.
+#[allow(clippy::too_many_arguments)]
 async fn connect(
     c: &RdpConfig,
     password: &str,
@@ -585,14 +629,26 @@ async fn connect(
     accept: Option<&str>,
     known_path: &Path,
     clipboard: Option<Box<dyn ironrdp_cliprdr::backend::CliprdrBackend>>,
+    via: Option<&crate::vpn::Tunnel>,
 ) -> AppResult<(ConnectionResult, Framed)> {
     let target = format!("{}:{}", c.host.trim(), c.port);
-    let stream = tokio::time::timeout(Duration::from_secs(15), tokio::net::TcpStream::connect(&target))
-        .await
-        .map_err(|_| AppError::msg(format!("Timed out connecting to {target}")))?
-        .map_err(|e| AppError::msg(format!("Could not connect to {target}: {e}")))?;
-    let _ = stream.set_nodelay(true);
-    let client_addr = stream.local_addr()?;
+    let (stream, client_addr) = match via {
+        Some(t) => {
+            let s = tokio::time::timeout(Duration::from_secs(30), t.net.connect(c.host.trim(), c.port))
+                .await
+                .map_err(|_| AppError::msg(format!("Timed out connecting to {target} through the VPN")))??;
+            (Stream::Vpn(s), std::net::SocketAddr::from((t.net.address, 49152)))
+        }
+        None => {
+            let stream = tokio::time::timeout(Duration::from_secs(15), tokio::net::TcpStream::connect(&target))
+                .await
+                .map_err(|_| AppError::msg(format!("Timed out connecting to {target}")))?
+                .map_err(|e| AppError::msg(format!("Could not connect to {target}: {e}")))?;
+            let _ = stream.set_nodelay(true);
+            let addr = stream.local_addr()?;
+            (Stream::Tcp(stream), addr)
+        }
+    };
     let mut framed = ironrdp_tokio::TokioFramed::new(stream);
 
     let drdynvc = ironrdp_dvc::DrdynvcClient::new()
@@ -678,10 +734,28 @@ pub async fn open(
         Some((w, h)) => adjust(w, h),
         None => adjust(req.width, req.height),
     };
+    // A VPN Tusk runs for this connection only: sign in (in the browser) first.
+    let tunnel = if c.vpn == "fortinet" {
+        let status = |text: String, url: Option<String>| {
+            let _ = events.send(json(&RdpEvent::Status { text, url }));
+        };
+        let settings = crate::vpn::Settings {
+            gateway: c.vpn_gateway.clone(),
+            realm: c.vpn_realm.clone(),
+            known_path: req.known_hosts.clone(),
+            accept: req.accept_fingerprint.clone(),
+        };
+        Some(sessions.vpns.tunnel(&app, &c.id, &req.session_id, settings, &status).await?)
+    } else {
+        None
+    };
     let (tx, rx) = mpsc::unbounded_channel();
     let clipboard = Clipboard::start(&app, c.clipboard, &req.session_id, tx.clone()).await;
     let backend = clipboard.backend();
-    let first = match connect(&c, &password, size, req.scale, req.accept_fingerprint.as_deref(), &req.known_hosts, backend).await {
+    if tunnel.is_some() {
+        let _ = events.send(json(&RdpEvent::Status { text: format!("Connecting to {} through the VPN…", c.host.trim()), url: None }));
+    }
+    let first = match connect(&c, &password, size, req.scale, req.accept_fingerprint.as_deref(), &req.known_hosts, backend, tunnel.as_deref()).await {
         Ok(r) => r,
         Err(e) => {
             clipboard.stop(&app);
@@ -704,7 +778,7 @@ pub async fn open(
         let reason = loop {
             let (result, framed) = match next.take() {
                 Some(r) => r,
-                None => match connect(&c, &password, size, scale, None, &known_path, clipboard.backend()).await {
+                None => match connect(&c, &password, size, scale, None, &known_path, clipboard.backend(), tunnel.as_deref()).await {
                     Ok(r) => r,
                     Err(e) => break Some(e.message),
                 },

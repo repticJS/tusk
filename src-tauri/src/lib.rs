@@ -13,6 +13,7 @@ mod ssh;
 mod stats;
 mod store;
 mod tunnel;
+mod vpn;
 
 use db::{SessionInfo, SessionRef, Sessions, StatementResult};
 use ssh::{SshConfig, SshSessions};
