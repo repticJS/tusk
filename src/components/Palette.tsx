@@ -1,6 +1,7 @@
-import { Activity, ArrowUpCircle, BellRing, Bot, FolderSync, Server, ScreenShare, Zap, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radar, Radio } from "lucide-react";
+import { Activity, ArrowUpCircle, FileText, BellRing, Bot, FolderSync, Server, ScreenShare, Zap, Clock, Database, Eye, Moon, Plus, Search, SquareTerminal, Sun, Table2, TerminalSquare, Waypoints, Monitor, Radar, Radio } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { api } from "../lib/api";
 import { formatDuration } from "../lib/sql";
 import { activeConnectionOf, cacheKey, isTermTab, useApp } from "../store";
 import { Modal } from "./ui";
@@ -90,6 +91,12 @@ export function CommandPalette() {
       label: "Check for updates",
       detail: useUpdater.getState().version ? `v${useUpdater.getState().version}` : undefined,
       run: () => void useUpdater.getState().checkNow(true),
+    });
+    out.push({
+      id: "logs",
+      icon: <FileText size={14} />,
+      label: "Open log folder (crash and connection logs)",
+      run: () => void api.openLogFolder().catch((e) => state.showToast(e instanceof Error ? e.message : String(e), "error")),
     });
     for (const sh of state.shells) {
       out.push({

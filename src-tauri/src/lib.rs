@@ -3,6 +3,7 @@ mod discover;
 mod error;
 mod files;
 mod local;
+mod log;
 mod mcp;
 mod monitor;
 mod pm2;
@@ -1393,6 +1394,14 @@ fn read_text_file(path: String) -> AppResult<String> {
     std::fs::read_to_string(path).map_err(AppError::from)
 }
 
+/// Opens the folder with `tusk.log` and `crash.log` in Explorer.
+#[tauri::command]
+fn open_log_folder(app: tauri::AppHandle) -> AppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = log::dir().ok_or_else(|| AppError::msg("Tusk couldn't find its settings folder"))?;
+    app.opener().open_path(dir.to_string_lossy(), None::<&str>).map_err(|e| AppError::msg(e.to_string()))
+}
+
 /// `tusk --mcp`: the bridge Claude starts (no window).
 pub fn mcp_bridge() {
     mcp::bridge()
@@ -1400,6 +1409,7 @@ pub fn mcp_bridge() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    log::init();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -1458,6 +1468,7 @@ pub fn run() {
             cancel_query,
             write_text_file,
             read_text_file,
+            open_log_folder,
             list_folders,
             save_folder,
             delete_folder,

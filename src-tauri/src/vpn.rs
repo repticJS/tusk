@@ -1056,6 +1056,7 @@ impl Network {
         let e = ended.clone();
         tokio::spawn(async move {
             let why = engine(Ppp::new(rand::random()), frames_in, frames_out, cmd_rx, dns, up_tx).await;
+            crate::log::info(&format!("VPN link ended: {why}"));
             *e.lock().unwrap() = Some(why);
         });
         let address = up_rx.await.map_err(|_| "The VPN tunnel stopped".to_string())??;
@@ -1157,6 +1158,7 @@ async fn open_tunnel(app: &tauri::AppHandle, s: Settings, status: Status<'_>) ->
     let (host, port) = parse_gateway(&s.gateway)?;
     let gw = Arc::new(Gateway::new(host, port, s.known_path, s.accept.as_deref())?);
     let addr = gw.addr();
+    crate::log::info(&format!("VPN: connecting to gateway {addr}"));
 
     // Check the gateway (and its certificate) before sending anyone to sign in.
     status(format!("Connecting to the VPN gateway {addr}…"), None);
@@ -1213,6 +1215,7 @@ async fn open_tunnel(app: &tauri::AppHandle, s: Settings, status: Status<'_>) ->
         let why = refused.lock().unwrap().clone().unwrap_or(e);
         AppError::msg(why)
     })?;
+    crate::log::info(&format!("VPN: tunnel to {addr} is up, address {}", net.address));
     Ok(Tunnel { net, gateway: gw, cookie })
 }
 
@@ -1220,7 +1223,8 @@ async fn open_tunnel(app: &tauri::AppHandle, s: Settings, status: Status<'_>) ->
 async fn read_frames<R: AsyncRead + Unpin>(mut rd: R, tx: mpsc::Sender<Vec<u8>>, refused: Arc<Mutex<Option<String>>>) {
     let mut head = [0u8; 6];
     loop {
-        if rd.read_exact(&mut head).await.is_err() {
+        if let Err(e) = rd.read_exact(&mut head).await {
+            crate::log::info(&format!("VPN: gateway connection closed ({e})"));
             break;
         }
         if &head[..4] == b"HTTP" {
@@ -1229,16 +1233,22 @@ async fn read_frames<R: AsyncRead + Unpin>(mut rd: R, tx: mpsc::Sender<Vec<u8>>,
             let n = rd.read(&mut rest).await.unwrap_or(0);
             let line = format!("HTTP{}", String::from_utf8_lossy(&[&head[4..], &rest[..n]].concat()));
             let status = line.lines().next().unwrap_or("").to_string();
+            crate::log::error(&format!("VPN: gateway refused the tunnel ({status})"));
             *refused.lock().unwrap() = Some(format!("The VPN gateway refused the tunnel ({status}). Your account may not have tunnel access."));
             break;
         }
         if head[2..4] != [0x50, 0x50] {
+            crate::log::error(&format!("VPN: unexpected frame header {head:02x?}"));
             *refused.lock().unwrap() = Some("The VPN gateway sent something Tusk doesn't understand".into());
             break;
         }
         let len = usize::from(u16::from_be_bytes([head[4], head[5]]));
         let mut f = vec![0u8; len];
-        if rd.read_exact(&mut f).await.is_err() || tx.send(f).await.is_err() {
+        if let Err(e) = rd.read_exact(&mut f).await {
+            crate::log::error(&format!("VPN: gateway connection broke mid-frame ({e})"));
+            break;
+        }
+        if tx.send(f).await.is_err() {
             break;
         }
     }
@@ -1261,7 +1271,8 @@ async fn write_frames<W: AsyncWrite + Unpin>(mut wr: W, mut rx: mpsc::UnboundedR
                 break;
             }
         }
-        if wr.write_all(&b).await.is_err() || wr.flush().await.is_err() {
+        if let Err(e) = async { wr.write_all(&b).await?; wr.flush().await }.await {
+            crate::log::error(&format!("VPN: couldn't send to the gateway ({e})"));
             break;
         }
     }
@@ -1294,7 +1305,13 @@ impl Vpns {
         }
         let cancel = self.cancel.lock().unwrap().entry(conn_id.to_string()).or_default().clone();
         let t = tokio::select! {
-            t = open_tunnel(app, settings, status) => Arc::new(t?),
+            t = open_tunnel(app, settings, status) => match t {
+                Ok(t) => Arc::new(t),
+                Err(e) => {
+                    crate::log::error(&format!("VPN: sign-in or tunnel failed: {}", e.message));
+                    return Err(e);
+                }
+            },
             _ = cancel.notified() => return Err(AppError::msg("Cancelled")),
         };
         if let Some(old) = self.tunnels.lock().unwrap().insert(conn_id.to_string(), t.clone()) {
@@ -1315,6 +1332,7 @@ impl Vpns {
         });
         for conn in done {
             if let Some(t) = self.tunnels.lock().unwrap().remove(&conn) {
+                crate::log::info("VPN: last session closed, closing the tunnel");
                 t.close();
             }
             if let Some(c) = self.cancel.lock().unwrap().get(&conn) {

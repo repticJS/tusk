@@ -211,6 +211,8 @@ export const api = {
   cancel: (session: SessionRef) => call<void>("cancel_query", { session }),
   writeTextFile: (path: string, contents: string) => call<void>("write_text_file", { path, contents }),
   readTextFile: (path: string) => call<string>("read_text_file", { path }),
+  /** Opens the folder with tusk.log and crash.log. */
+  openLogFolder: () => call<void>("open_log_folder"),
 };
 
 // ---- SSH ----

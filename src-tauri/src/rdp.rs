@@ -755,9 +755,12 @@ pub async fn open(
     if tunnel.is_some() {
         let _ = events.send(json(&RdpEvent::Status { text: format!("Connecting to {} through the VPN…", c.host.trim()), url: None }));
     }
+    let via = if tunnel.is_some() { " through the VPN" } else { "" };
+    crate::log::info(&format!("Remote desktop: connecting to {}{via}", c.host.trim()));
     let first = match connect(&c, &password, size, req.scale, req.accept_fingerprint.as_deref(), &req.known_hosts, backend, tunnel.as_deref()).await {
         Ok(r) => r,
         Err(e) => {
+            crate::log::error(&format!("Remote desktop: couldn't connect to {}{via}: {}", c.host.trim(), e.message));
             clipboard.stop(&app);
             return Err(e);
         }
@@ -791,6 +794,10 @@ pub async fn open(
                 Err(e) => break Some(e),
             }
         };
+        match &reason {
+            Some(why) => crate::log::error(&format!("Remote desktop: {} ended{via}: {why}", c.host.trim())),
+            None => crate::log::info(&format!("Remote desktop: {} closed", c.host.trim())),
+        }
         let _ = events.send(json(&RdpEvent::Closed { reason }));
         clipboard.stop(&app);
         // Forget the session unless a newer one took its place.

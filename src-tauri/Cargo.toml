@@ -59,7 +59,7 @@ smoltcp = { version = "0.12", default-features = false, features = ["std", "medi
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 ironrdp-cliprdr-native = { git = "https://github.com/Devolutions/IronRDP", rev = "637f838ea0e2adcfbfddc94b147958ec672898ff" }
-windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [profile.release]
 codegen-units = 1
