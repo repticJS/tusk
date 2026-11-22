@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.1
+
+- Crash and connection logs: Tusk now keeps `tusk.log` and `crash.log` in its settings folder (`%APPDATA%\dev.tusk.app`). Open it with **Open log folder** in the command palette (Ctrl+P).
+- A crash records its message, where in Tusk it happened and a backtrace, so it can be found and fixed.
+- SSH connections, the FortiGate VPN and remote desktops log when they connect, fail, or drop, and why.
+
 ## 0.18.0
 
 - Remote desktops behind a FortiGate VPN: set **Connect through** to *FortiGate VPN with single sign-on* and enter the gateway from FortiClient. Tusk signs in through your company's page in your browser and sends only that desktop through the VPN. The rest of your PC stays off the VPN, with no FortiClient, network adapter or admin rights needed.
