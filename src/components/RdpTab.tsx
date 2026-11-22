@@ -197,7 +197,8 @@ export function RdpTab({ tab, active, windowed = false }: { tab: RdpTabModel; ac
       setDesk({ width: e.width, height: e.height });
       if (e.type === "connected") setState({ phase: "connected" });
     } else if (e.type === "status") {
-      setState((s) => (s.phase === "connecting" ? { phase: "connecting", text: e.text, url: e.url } : s));
+      // While connecting, or reconnecting after a drop.
+      setState((s) => (s.phase === "connecting" || s.phase === "connected" ? { phase: "connecting", text: e.text, url: e.url } : s));
     } else if (e.type === "pointer") {
       setCursor(e.kind === "hidden" ? "none" : "default");
     } else if (e.type === "closed") {

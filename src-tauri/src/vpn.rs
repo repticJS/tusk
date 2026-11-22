@@ -724,6 +724,8 @@ struct Conn {
     pending_in: Option<Vec<u8>>,
     app_closed: bool,
     target: String,
+    /// Who ended the connection first, for the log.
+    end: Option<&'static str>,
 }
 
 /// Moves bytes between the app's streams and the stack's sockets; true when
@@ -759,7 +761,10 @@ fn service(conns: &mut Vec<Conn>, sockets: &mut SocketSet<'_>) -> bool {
             match c.from_app.try_recv() {
                 Ok(b) => c.out.extend(b),
                 Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => c.app_closed = true,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    c.app_closed = true;
+                    c.end.get_or_insert("closed by Tusk");
+                }
             }
         }
         if !c.out.is_empty() && s.can_send() {
@@ -783,6 +788,7 @@ fn service(conns: &mut Vec<Conn>, sockets: &mut SocketSet<'_>) -> bool {
                         // The app is gone.
                         c.to_app = None;
                         c.app_closed = true;
+                        c.end.get_or_insert("closed by Tusk");
                         s.abort();
                         break;
                     }
@@ -799,11 +805,20 @@ fn service(conns: &mut Vec<Conn>, sockets: &mut SocketSet<'_>) -> bool {
             b.truncate(n);
             c.pending_in = Some(b);
         }
+        if !s.may_recv() && s.state() != tcp::State::Closed {
+            c.end.get_or_insert("closed by the far end");
+        }
         if !s.may_recv() && c.pending_in.is_none() {
             // The far end is done: the app reads to the end.
             c.to_app = None;
         }
         if s.state() == tcp::State::Closed && c.pending_in.is_none() {
+            match c.end {
+                Some(how) => crate::log::info(&format!("VPN: connection to {} {how}", c.target)),
+                // Straight to closed: a reset from the far end (or the
+                // FortiGate), or the stack giving up on it.
+                None => crate::log::error(&format!("VPN: connection to {} was reset or timed out", c.target)),
+            }
             sockets.remove(c.handle);
             return false;
         }
@@ -964,7 +979,7 @@ async fn engine(
                     let (from_app, to_app) = pump(mine, wake.clone());
                     conns.push(Conn {
                         handle, app: Some(app), reply: Some(reply), deadline: tokio::time::Instant::now() + Duration::from_secs(20),
-                        from_app, to_app: Some(to_app), out: VecDeque::new(), pending_in: None, app_closed: false, target: format!("{ip}:{port}"),
+                        from_app, to_app: Some(to_app), out: VecDeque::new(), pending_in: None, app_closed: false, target: format!("{ip}:{port}"), end: None,
                     });
                 }
                 Some(Cmd::Resolve { name, reply }) => match dns_socket {
@@ -980,6 +995,9 @@ async fn engine(
             _ = keepalive.tick() => { let _ = frames_out.send(ppp.echo_request()); }
         }
     };
+    if !conns.is_empty() {
+        crate::log::error(&format!("VPN: link ended with {} open connection(s): {}", conns.len(), conns.iter().map(|c| c.target.as_str()).collect::<Vec<_>>().join(", ")));
+    }
     for c in conns.iter_mut() {
         if let Some(r) = c.reply.take() {
             let _ = r.send(Err(reason.clone()));

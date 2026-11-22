@@ -778,20 +778,51 @@ pub async fn open(
         let mut events = events;
         let mut next = Some(first);
         let mut size = size;
+        // Recent unexpected drops: reconnect on its own unless they pile up.
+        let mut drops: Vec<std::time::Instant> = Vec::new();
+        let mut redialing = false;
         let reason = loop {
             let (result, framed) = match next.take() {
                 Some(r) => r,
                 None => match connect(&c, &password, size, scale, None, &known_path, clipboard.backend(), tunnel.as_deref()).await {
                     Ok(r) => r,
+                    Err(e) if redialing && drops.len() < MAX_DROPS && !tunnel.as_ref().is_some_and(|t| !t.alive()) => {
+                        crate::log::error(&format!("Remote desktop: reconnecting to {}{via} failed: {}", c.host.trim(), e.message));
+                        drops.push(std::time::Instant::now());
+                        if !wait_or_close(&mut rx, Duration::from_secs(3)).await {
+                            break None;
+                        }
+                        continue;
+                    }
                     Err(e) => break Some(e.message),
                 },
             };
+            if redialing {
+                crate::log::info(&format!("Remote desktop: reconnected to {}{via}", c.host.trim()));
+                redialing = false;
+            }
             *desk.lock().unwrap() = (result.desktop_size.width, result.desktop_size.height);
             let _ = events.send(json(&RdpEvent::Connected { width: result.desktop_size.width, height: result.desktop_size.height }));
             match run(framed, result, &mut events, &mut rx, &desk).await {
                 Ok(Flow::Reconnect(s)) => size = s,
                 Ok(Flow::Ended(reason)) => break reason,
-                Err(e) => break Some(e),
+                Err(e) => {
+                    let vpn_down = tunnel.as_ref().is_some_and(|t| !t.alive());
+                    crate::log::error(&format!("Remote desktop: {} dropped{via}: {e}", c.host.trim()));
+                    if vpn_down {
+                        break Some("The VPN connection dropped. Reconnect to sign in to the VPN again.".into());
+                    }
+                    drops.retain(|t| t.elapsed() < DROP_WINDOW);
+                    if !dropped(&e) || drops.len() >= MAX_DROPS {
+                        break Some(e);
+                    }
+                    drops.push(std::time::Instant::now());
+                    let _ = events.send(json(&RdpEvent::Status { text: "The connection dropped. Reconnecting…".into(), url: None }));
+                    if !wait_or_close(&mut rx, Duration::from_secs(2)).await {
+                        break None;
+                    }
+                    redialing = true;
+                }
             }
         };
         match &reason {
@@ -815,8 +846,42 @@ enum Flow {
     Ended(Option<String>),
 }
 
+/// Unexpected drops allowed within `DROP_WINDOW` before the session gives up.
+const MAX_DROPS: usize = 3;
+const DROP_WINDOW: Duration = Duration::from_secs(300);
+
 fn session_err(e: impl std::fmt::Display) -> String {
+    let e = e.to_string();
+    // rustls: the TCP connection ended without the TLS goodbye.
+    if e.contains("close_notify") {
+        return "Connection lost: the remote PC or the network closed the connection".into();
+    }
     format!("Connection lost: {e}")
+}
+
+/// Whether a session error is the connection dropping (worth reconnecting),
+/// rather than the server ending the session or a protocol error.
+fn dropped(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    ["closed the connection", "end of file", "eof", "reset", "broken pipe", "aborted", "timed out", "10053", "10054", "10060"]
+        .iter()
+        .any(|k| e.contains(k))
+}
+
+/// Waits before reconnecting; false when the tab was closed meanwhile.
+async fn wait_or_close(rx: &mut mpsc::UnboundedReceiver<Input>, d: Duration) -> bool {
+    let sleep = tokio::time::sleep(d);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            _ = &mut sleep => return true,
+            i = rx.recv() => match i {
+                None | Some(Input::Close) => return false,
+                // Input while reconnecting goes nowhere.
+                Some(_) => {}
+            },
+        }
+    }
 }
 
 /// The active session: screen updates out, input in.
@@ -1165,6 +1230,15 @@ fn clipboard_message(stage: &mut ActiveStage, m: ironrdp_cliprdr::backend::Clipb
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drops_are_told_apart() {
+        let tls = super::session_err("peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/");
+        assert_eq!(tls, "Connection lost: the remote PC or the network closed the connection");
+        assert!(super::dropped(&tls));
+        assert!(super::dropped(&super::session_err("An existing connection was forcibly closed by the remote host. (os error 10054)")));
+        assert!(!super::dropped(&super::session_err("invalid PDU")));
+    }
+
     use super::*;
 
     #[test]
