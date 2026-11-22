@@ -182,6 +182,23 @@ impl client::Handler for Client {
         Ok(false)
     }
 
+    /// Records why a connection ended when the server or the network ended
+    /// it (a VPN dropping shows up here as a keepalive timeout or reset).
+    async fn disconnected(&mut self, reason: client::DisconnectReason<Self::Error>) -> Result<(), Self::Error> {
+        let at = format!("{}:{}", self.host, self.port);
+        match reason {
+            client::DisconnectReason::ReceivedDisconnect(info) => {
+                let msg = if info.message.is_empty() { String::new() } else { format!(": {}", info.message) };
+                crate::log::info(&format!("SSH {at}: server closed the connection ({:?}{msg})", info.reason_code));
+                Ok(())
+            }
+            client::DisconnectReason::Error(e) => {
+                crate::log::error(&format!("SSH {at}: connection lost: {e}"));
+                Err(e)
+            }
+        }
+    }
+
     async fn auth_banner(
         &mut self,
         banner: &str,
@@ -348,6 +365,26 @@ pub async fn connect(
     known_hosts: &std::path::Path,
     forwards: crate::tunnel::RemoteForwards,
 ) -> AppResult<(Handle<Client>, Option<String>)> {
+    let result = connect_inner(cfg, secret, accept_fingerprint, known_hosts, forwards).await;
+    let at = format!("{}@{}:{}", cfg.user, cfg.host, cfg.port);
+    match &result {
+        Ok(_) => crate::log::info(&format!("SSH {at}: connected ({} auth)", cfg.auth)),
+        // Questions for the user (password, host key) aren't failures.
+        Err(e) if e.kind.as_deref().is_some_and(|k| k.ends_with("_REQUIRED") || k.starts_with("HOSTKEY_")) => {
+            crate::log::info(&format!("SSH {at}: waiting for the user ({})", e.kind.as_deref().unwrap_or("")))
+        }
+        Err(e) => crate::log::error(&format!("SSH {at}: couldn't connect: {}", e.message)),
+    }
+    result
+}
+
+async fn connect_inner(
+    cfg: &SshConfig,
+    secret: Option<&str>,
+    accept_fingerprint: Option<String>,
+    known_hosts: &std::path::Path,
+    forwards: crate::tunnel::RemoteForwards,
+) -> AppResult<(Handle<Client>, Option<String>)> {
     let issue = Arc::new(StdMutex::new(None));
     let banner = Arc::new(StdMutex::new(None));
     let handler = Client {
@@ -436,9 +473,13 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
     sessions.terms.lock().await.insert(req.term_id.clone(), Terminal { tx, conn: conn.clone() });
 
     let _ = events.send(json(&TermEvent::Connected { banner }));
+    let at = format!("{}@{}:{}", cfg.user, cfg.host, cfg.port);
+    crate::log::info(&format!("SSH {at}: terminal opened"));
 
     tokio::spawn(async move {
         let mut reason: Option<String> = None;
+        // How the terminal ended, for the log.
+        let mut ended = "connection dropped";
         loop {
             tokio::select! {
                 msg = channel.wait() => match msg {
@@ -449,15 +490,21 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
                         let _ = events.send(InvokeResponseBody::Raw(data.to_vec()));
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
+                        crate::log::info(&format!("SSH {at}: shell exited with status {exit_status}"));
                         let _ = events.send(json(&TermEvent::Exit { status: exit_status }));
                     }
-                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) => {
+                        ended = "closed by the server";
+                        break;
+                    }
+                    None => break,
                     Some(_) => {}
                 },
                 cmd = rx.recv() => match cmd {
                     Some(Cmd::Write(bytes)) => {
                         if let Err(e) = channel.data_bytes(bytes).await {
                             reason = Some(e.to_string());
+                            ended = "send failed";
                             break;
                         }
                     }
@@ -466,10 +513,16 @@ pub async fn open(sessions: &SshSessions, req: OpenRequest, events: Channel<Invo
                     }
                     Some(Cmd::Close) | None => {
                         let _ = channel.close().await;
+                        ended = "closed in Tusk";
                         break;
                     }
                 },
             }
+        }
+        match &reason {
+            Some(why) => crate::log::error(&format!("SSH {at}: terminal ended ({ended}): {why}")),
+            None if ended == "connection dropped" => crate::log::error(&format!("SSH {at}: terminal ended ({ended})")),
+            None => crate::log::info(&format!("SSH {at}: terminal ended ({ended})")),
         }
         let _ = conn.handle.disconnect(Disconnect::ByApplication, "", "en").await;
         let _ = events.send(json(&TermEvent::Closed { reason }));
