@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.2
+
+- Remote desktops reconnect on their own when the connection drops, as long as the VPN tunnel is still up (up to 3 times in 5 minutes).
+- Clearer message when a connection drops: "the remote PC or the network closed the connection" instead of the TLS `close_notify` error, and "The VPN connection dropped" when the tunnel itself is gone.
+- The log records how each connection through the VPN ended: closed by Tusk, closed by the remote PC, or reset or timed out.
+
 ## 0.18.1
 
 - Crash and connection logs: Tusk now keeps `tusk.log` and `crash.log` in its settings folder (`%APPDATA%\dev.tusk.app`). Open it with **Open log folder** in the command palette (Ctrl+P).
