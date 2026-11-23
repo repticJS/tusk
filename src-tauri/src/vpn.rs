@@ -1150,11 +1150,12 @@ impl Tunnel {
         self.net.alive()
     }
 
-    /// Ends the tunnel and signs out.
+    /// Ends the tunnel and signs out. Safe to call from any thread: closing
+    /// a remote desktop tab runs on the main thread, outside the runtime.
     pub fn close(&self) {
         self.net.close();
         let (gw, cookie) = (self.gateway.clone(), self.cookie.clone());
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let _ = gw.request("GET", "/remote/logout", Some(&cookie)).await;
         });
     }
@@ -1363,6 +1364,18 @@ impl Vpns {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Closing a remote desktop tab closes its tunnel from the main thread,
+    /// which has no Tokio runtime; that used to panic and crash Tusk.
+    #[test]
+    fn tunnel_closes_outside_the_runtime() {
+        let (cmds, mut rx) = mpsc::unbounded_channel();
+        let net = Network { cmds, address: Ipv4Addr::new(10, 0, 0, 2), domain: None, ended: Default::default() };
+        let gateway = Arc::new(Gateway::new("127.0.0.1".into(), 9, std::env::temp_dir().join("tusk-test-known"), None).unwrap());
+        let tunnel = Tunnel { net, gateway, cookie: "test".into() };
+        std::thread::spawn(move || tunnel.close()).join().expect("close panicked");
+        assert!(matches!(rx.try_recv(), Ok(Cmd::Close)));
+    }
 
     #[test]
     fn gateways_parse() {

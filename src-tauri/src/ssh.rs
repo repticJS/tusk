@@ -192,6 +192,11 @@ impl client::Handler for Client {
                 crate::log::info(&format!("SSH {at}: server closed the connection ({:?}{msg})", info.reason_code));
                 Ok(())
             }
+            // The connection ended cleanly: Tusk closed it, or the stream ended.
+            client::DisconnectReason::Error(e @ russh::Error::Disconnect) => {
+                crate::log::info(&format!("SSH {at}: connection ended"));
+                Err(e)
+            }
             client::DisconnectReason::Error(e) => {
                 crate::log::error(&format!("SSH {at}: connection lost: {e}"));
                 Err(e)
