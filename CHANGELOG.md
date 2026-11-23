@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.18.3
+
+- Fixed a crash when closing the last remote desktop tab that goes through a FortiGate VPN.
+- A cleanly closed SSH connection is no longer logged as an error.
+
 ## 0.18.2
 
 - Remote desktops reconnect on their own when the connection drops, as long as the VPN tunnel is still up (up to 3 times in 5 minutes).
